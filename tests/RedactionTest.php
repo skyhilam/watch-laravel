@@ -108,8 +108,37 @@ final class RedactionTest extends TestCase
         $this->assertSame(Redactor::REPLACEMENT, $redacted['api_key']);
         $this->assertSame('Ada', $redacted['name']);
         $this->assertSame(Redactor::REPLACEMENT, $redacted['nested']['PASSWORD']);
-        $this->assertSame('kept', $redacted['nested']['token']);
+        $this->assertSame(Redactor::REPLACEMENT, $redacted['nested']['token']);
         $this->assertContains('password', $this->app->make(Redactor::class)->keys());
         $this->assertContains('api_key', $this->app->make(Redactor::class)->keys());
+    }
+
+    public function test_expanded_defaults_and_nested_key_variants_are_redacted_with_old_config(): void
+    {
+        config(['watch.redact' => ['custom-header']]);
+        $redactor = $this->app->make(Redactor::class);
+
+        foreach (Redactor::DEFAULT_KEYS as $key) {
+            $variant = strtoupper(str_replace('_', '-', $key));
+            $this->assertSame([[$variant => Redactor::REPLACEMENT]], $redactor->redact([[$variant => 'synthetic-sensitive-value']]));
+            $this->assertSame(Redactor::REPLACEMENT, $redactor->headers([$variant => 'synthetic-sensitive-value'])[strtolower($variant)]);
+        }
+
+        foreach (['reset-Token-value', 'DB_PASSWD', 'client-SECRET-value', 'service-api_key', 'custom_header'] as $key) {
+            $this->assertSame([$key => Redactor::REPLACEMENT], $redactor->redact([$key => 'synthetic-sensitive-value']));
+        }
+    }
+
+    public function test_url_headers_strip_query_fragment_and_userinfo_before_transport(): void
+    {
+        $redactor = $this->app->make(Redactor::class);
+
+        foreach (['Referer', 'Origin', 'Location', 'Content-Location', 'X-Original-URL', 'X-Rewrite-URL', 'X-Forwarded-URI'] as $name) {
+            $headers = $redactor->headers([$name => [
+                'https://user:synthetic-url-secret@app.example.test:8443/orders?token=synthetic-query#synthetic-fragment',
+                '/orders?page=2#details',
+            ]]);
+            $this->assertSame('https://app.example.test:8443/orders, /orders', $headers[strtolower($name)]);
+        }
     }
 }
