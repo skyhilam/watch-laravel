@@ -32,18 +32,26 @@ use Watch\Laravel\Spool\FileDropLedger;
 use Watch\Laravel\Spool\FileSpool;
 use Watch\Laravel\Spool\FilesystemSpoolWriter;
 use Watch\Laravel\Spool\SpoolWriter;
+use Watch\Laravel\Support\WatchToken;
 use Watch\Laravel\Transport\AgentTransport;
 use Watch\Laravel\Transport\Endpoint;
 use Watch\Laravel\Transport\StreamSocketClient;
 
 class WatchServiceProvider extends ServiceProvider
 {
+    /**
+     * One warning per process when WATCH_TOKEN is set but cannot be parsed.
+     */
+    private static bool $invalidTokenWarned = false;
+
     public function register(): void
     {
         $this->mergeConfigFrom(
             dirname(__DIR__).'/config/watch.php',
             'watch',
         );
+
+        $this->applyWatchToken();
 
         $this->app->scoped(RequestContext::class, static fn (): RequestContext => new RequestContext());
         $this->app->singleton(Redactor::class);
@@ -139,6 +147,65 @@ class WatchServiceProvider extends ServiceProvider
         }
 
         return $default;
+    }
+
+    /**
+     * Fill only values that are still null or an empty string. Explicit env
+     * and published config are already on the repository and win.
+     */
+    private function applyWatchToken(): void
+    {
+        try {
+            $token = $this->app->make('config')->get('watch.token');
+            if (! is_string($token) || trim($token) === '') {
+                return;
+            }
+
+            $parsed = WatchToken::parse(trim($token));
+            if ($parsed === null) {
+                $this->warnInvalidTokenOnce();
+
+                return;
+            }
+
+            $this->fillConfigIfEmpty('watch.agent.central_url', $parsed['url'].'/api/v1/ingest');
+            $this->fillConfigIfEmpty('watch.agent.project_key', $parsed['key']);
+
+            if (is_string($parsed['endpoint']) && $parsed['endpoint'] !== '') {
+                $this->fillConfigIfEmpty('watch.transport.endpoint', $parsed['endpoint']);
+            }
+        } catch (Throwable) {
+            $this->warnInvalidTokenOnce();
+        }
+    }
+
+    private function fillConfigIfEmpty(string $key, string $value): void
+    {
+        $config = $this->app->make('config');
+        $current = $config->get($key);
+        if ($current !== null && $current !== '') {
+            return;
+        }
+
+        $config->set($key, $value);
+    }
+
+    private function warnInvalidTokenOnce(): void
+    {
+        try {
+            if (self::$invalidTokenWarned) {
+                return;
+            }
+
+            self::$invalidTokenWarned = true;
+
+            $logger = $this->app->make('log');
+            if (is_object($logger) && method_exists($logger, 'warning')) {
+                $logger->warning('WATCH_TOKEN 格式唔正確，已略過。應用程式繼續運行。');
+            }
+        } catch (Throwable) {
+            // A bad token, or a logger that is not ready, must not stop the host app.
+        }
     }
 
     private function registerPublishing(): void

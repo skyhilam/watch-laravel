@@ -87,6 +87,26 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Install token
+    |--------------------------------------------------------------------------
+    |
+    | 一個 WATCH_TOKEN 就夠安裝。格式係 wt_ 加上 base64url（冇 padding）嘅
+    | json_encode(['v' => 1, 'url' => '<central base URL，冇尾 />', 'key' => '<project key>'], JSON_UNESCAPED_SLASHES)。
+    | 可以有 endpoint 字串。套件只會喺下面嘅值仲係 null 或者空字串時先填：
+    | central_url = url + /api/v1/ingest、project_key = key、
+    | transport.endpoint = endpoint（token 有先填）。
+    |
+    | WATCH_CENTRAL_URL、WATCH_PROJECT_KEY、WATCH_AGENT_ENDPOINT，或者已發佈
+    | config 入面唔係 null／空字串嘅值，一律優先。Token 格式錯就略過，每個
+    | process 只記一次 warning，唔會阻止 app 啟動，warning 亦唔包含 token 或 key。
+    | 冇設定就唔記 warning。
+    |
+    */
+
+    'token' => env('WATCH_TOKEN'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Transport（來源 app → 本地 agent）
     |--------------------------------------------------------------------------
     |
