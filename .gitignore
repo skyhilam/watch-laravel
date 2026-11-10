@@ -1,0 +1,4 @@
+# The repo root ignores runtime `spool/` directories. On case-insensitive
+# filesystems that rule also matches these source directories, so re-include them.
+!/src/Spool/
+!/tests/Spool/

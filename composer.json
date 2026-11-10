@@ -11,6 +11,9 @@
         "orchestra/testbench": "^10.0 || ^11.0",
         "phpunit/phpunit": "^11.5.50 || ^12.5.8 || ^13.0"
     },
+    "suggest": {
+        "ext-pcntl": "Lets watch:agent stop cleanly on SIGTERM/SIGINT."
+    },
     "autoload": {
         "psr-4": {
             "Watch\\Laravel\\": "src/"
