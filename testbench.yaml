@@ -1,6 +1,8 @@
 # Workbench for scripts/e2e.sh. Testbench discovers workbench/routes/web.php.
 # The package provider comes from composer.json extra.laravel.providers.
-laravel: '@testbench'
+# Testbench 6 (Laravel 8) does not understand the @testbench alias, so this
+# is an explicit relative path. It is the same directory as scripts/e2e.sh skeleton_env.
+laravel: ./vendor/orchestra/testbench-core/laravel
 
 workbench:
   start: /watch-e2e

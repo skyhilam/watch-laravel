@@ -5,12 +5,12 @@ declare(strict_types=1);
 namespace Watch\Laravel\Agent;
 
 use Closure;
-use Illuminate\Support\Str;
 use Throwable;
 use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Spool\DropLedger;
 use Watch\Laravel\Spool\FileSpool;
+use Watch\Laravel\Support\Uuid7;
 
 /**
  * Builds the periodic completeness counts and the agent_status heartbeat.
@@ -53,7 +53,7 @@ final class StatusReporter
             $this->absorbLedger();
             $this->pending = [];
             $this->pendingTotals = [];
-            $this->heartbeatId = (string) Str::uuid7();
+            $this->heartbeatId = Uuid7::generate();
 
             foreach (Reason::drops() as $reason) {
                 $total = $this->recorder->count($reason);
@@ -62,7 +62,7 @@ final class StatusReporter
                     $this->pendingTotals[$reason] = $total;
                     $this->pending[] = [
                         'type' => 'completeness',
-                        'ingest_id' => (string) Str::uuid7(),
+                        'ingest_id' => Uuid7::generate(),
                         'reason' => $reason,
                         'count' => $delta,
                     ];

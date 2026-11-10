@@ -28,6 +28,9 @@ final class EndpointTest extends TestCase
         $this->assertSame('/tmp/b.sock', Endpoint::fromConfig('/tmp/b.sock', '/x')->socketPath());
     }
 
+    /**
+     * @dataProvider loopbackEndpoints
+     */
     #[DataProvider('loopbackEndpoints')]
     public function test_loopback_tcp_is_accepted(string $value, string $expected): void
     {
@@ -48,6 +51,9 @@ final class EndpointTest extends TestCase
         yield 'localhost' => ['tcp://localhost:9427', 'tcp://localhost:9427'];
     }
 
+    /**
+     * @dataProvider nonLoopbackEndpoints
+     */
     #[DataProvider('nonLoopbackEndpoints')]
     public function test_non_loopback_tcp_is_refused(string $value): void
     {

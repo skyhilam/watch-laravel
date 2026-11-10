@@ -192,9 +192,13 @@ final class LifecycleTest extends TestCase
 
     public function test_a_real_console_command_flushes_when_it_finishes(): void
     {
-        // Laravel only turns Symfony's console events into CommandFinished
-        // outside unit tests; switch that on, as a real artisan run has it.
-        $this->app->make(ConsoleKernel::class)->rerouteSymfonyCommandEvents();
+        // Laravel 9+ only turns Symfony's console events into CommandFinished
+        // outside unit tests. Laravel 8 already dispatches that event from
+        // Illuminate\Console\Application::run(), and its kernel has no switch.
+        $kernel = $this->app->make(ConsoleKernel::class);
+        if (method_exists($kernel, 'rerouteSymfonyCommandEvents')) {
+            $kernel->rerouteSymfonyCommandEvents();
+        }
         $this->leaveOneDropPending();
 
         $this->assertSame(0, $this->runCommand('list')[0]);

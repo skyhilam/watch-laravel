@@ -75,6 +75,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerLogProcessor();
         $this->registerMiddleware();
         $this->registerLifecycle();
+        $this->registerE2eFixtureRoute();
     }
 
     public static function defaultSocketPath(): string
@@ -205,5 +206,45 @@ class WatchServiceProvider extends ServiceProvider
         } catch (Throwable) {
             // Lifecycle hooks are best effort and must not break the host app.
         }
+    }
+
+    /**
+     * scripts/e2e.sh sets WATCH_E2E_FIXTURE. Testbench 6's `serve` does not
+     * forward TESTBENCH_WORKING_PATH, so workbench/routes/web.php is not
+     * discovered and GET /watch-e2e is a 404. Register the same fixture when
+     * that route is still missing. Host apps leave the variable unset.
+     * Keep the closure in sync with workbench/routes/web.php.
+     */
+    private function registerE2eFixtureRoute(): void
+    {
+        if (! $this->e2eFixtureEnabled()) {
+            return;
+        }
+
+        $this->app->booted(function (): void {
+            $router = $this->app->make('router');
+            if (! is_object($router) || ! method_exists($router, 'has') || $router->has('watch.e2e.ping')) {
+                return;
+            }
+
+            $router->get('/watch-e2e', static function () {
+                \Illuminate\Support\Facades\Log::info('watch-e2e correlated log', [
+                    'password' => 'E2E_PLAINTEXT_PASSWORD',
+                ]);
+
+                return response('watch-e2e-ok', 200);
+            })->middleware('web')->name('watch.e2e.ping');
+        });
+    }
+
+    private function e2eFixtureEnabled(): bool
+    {
+        $value = $_ENV['WATCH_E2E_FIXTURE'] ?? $_SERVER['WATCH_E2E_FIXTURE'] ?? false;
+        if ($value === false) {
+            $fromEnv = getenv('WATCH_E2E_FIXTURE');
+            $value = $fromEnv === false ? env('WATCH_E2E_FIXTURE') : $fromEnv;
+        }
+
+        return filter_var($value, FILTER_VALIDATE_BOOLEAN);
     }
 }

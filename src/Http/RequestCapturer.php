@@ -6,7 +6,6 @@ namespace Watch\Laravel\Http;
 
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Http\Request;
-use Illuminate\Support\Str;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 use Watch\Laravel\Completeness\Reason;
@@ -17,6 +16,7 @@ use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
+use Watch\Laravel\Support\Uuid7;
 
 final class RequestCapturer
 {
@@ -41,7 +41,7 @@ final class RequestCapturer
         $logLimit = is_numeric($limit) ? (int) $limit : 200;
 
         $this->context()->begin(
-            (string) Str::uuid7(),
+            Uuid7::generate(),
             $decision['sampled'],
             $decision['rate'],
             $parsed['trace_id'] ?? null,
@@ -148,6 +148,16 @@ final class RequestCapturer
         $body = $request->isJson()
             ? $request->json()->all()
             : $request->request->all();
+
+        // Laravel 8's Request::createFromBase points the request bag at the
+        // query bag for GET and HEAD. The query string is not the body.
+        if (
+            ! $request->isJson()
+            && in_array(strtoupper($request->getRealMethod()), ['GET', 'HEAD'], true)
+            && $body === $request->query->all()
+        ) {
+            $body = [];
+        }
 
         if (! is_array($body)) {
             return null;

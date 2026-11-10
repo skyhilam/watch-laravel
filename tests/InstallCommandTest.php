@@ -4,34 +4,33 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Tests;
 
+use Illuminate\Support\Facades\Artisan;
 use Orchestra\Testbench\TestCase;
 use Watch\Laravel\WatchServiceProvider;
 
 final class InstallCommandTest extends TestCase
 {
-    private string $configDirectory;
+    private string $published = '';
 
     protected function getPackageProviders($app): array
     {
         return [WatchServiceProvider::class];
     }
 
-    protected function getEnvironmentSetUp($app): void
+    protected function setUp(): void
     {
-        $this->configDirectory = sys_get_temp_dir().'/watch-config-'.bin2hex(random_bytes(4));
-        mkdir($this->configDirectory);
-        $app->useConfigPath($this->configDirectory);
+        parent::setUp();
+
+        $this->published = config_path('watch.php');
+        if (is_file($this->published)) {
+            unlink($this->published);
+        }
     }
 
     protected function tearDown(): void
     {
-        $published = $this->configDirectory.'/watch.php';
-        if (is_file($published)) {
-            unlink($published);
-        }
-
-        if (is_dir($this->configDirectory)) {
-            rmdir($this->configDirectory);
+        if ($this->published !== '' && is_file($this->published)) {
+            unlink($this->published);
         }
 
         parent::tearDown();
@@ -39,29 +38,25 @@ final class InstallCommandTest extends TestCase
 
     public function test_install_publishes_config_prints_guidance_and_is_idempotent(): void
     {
-        $published = $this->configDirectory.'/watch.php';
         $package = file_get_contents(dirname(__DIR__).'/config/watch.php');
         $this->assertIsString($package);
 
-        $this->artisan('watch:install')
-            ->expectsOutputToContain('watch:agent')
-            ->expectsOutputToContain('127.0.0.1')
-            ->expectsOutputToContain('未量測提案')
-            ->assertSuccessful();
+        $this->assertSame(0, Artisan::call('watch:install'));
+        $output = Artisan::output();
+        $this->assertStringContainsString('watch:agent', $output);
+        $this->assertStringContainsString('127.0.0.1', $output);
+        $this->assertStringContainsString('未量測提案', $output);
 
-        $this->assertFileExists($published);
-        $this->assertSame($package, file_get_contents($published));
+        $this->assertFileExists($this->published);
+        $this->assertSame($package, file_get_contents($this->published));
 
-        file_put_contents($published, "<?php\nreturn ['sentinel' => true];\n");
+        file_put_contents($this->published, "<?php\nreturn ['sentinel' => true];\n");
 
-        $this->artisan('watch:install')
-            ->expectsOutputToContain('唔會覆寫')
-            ->assertSuccessful();
+        $this->assertSame(0, Artisan::call('watch:install'));
+        $this->assertStringContainsString('唔會覆寫', Artisan::output());
+        $this->assertSame("<?php\nreturn ['sentinel' => true];\n", file_get_contents($this->published));
 
-        $this->assertSame("<?php\nreturn ['sentinel' => true];\n", file_get_contents($published));
-
-        $this->artisan('watch:install', ['--force' => true])->assertSuccessful();
-
-        $this->assertSame($package, file_get_contents($published));
+        $this->assertSame(0, Artisan::call('watch:install', ['--force' => true]));
+        $this->assertSame($package, file_get_contents($this->published));
     }
 }

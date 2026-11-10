@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Envelope;
 
-use Illuminate\Support\Str;
 use Watch\Laravel\Context\RequestContext;
+use Watch\Laravel\Support\Uuid7;
 
 final class RequestEnvelopeFactory
 {
@@ -106,7 +106,7 @@ final class RequestEnvelopeFactory
 
     private function ingestId(): string
     {
-        return (string) Str::uuid7();
+        return Uuid7::generate();
     }
 
     private function stamp(?\DateTimeImmutable $at): string
