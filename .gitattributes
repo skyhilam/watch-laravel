@@ -1,0 +1,9 @@
+# Kept out of the Composer dist archive (Packagist serves `git archive` of the
+# public repository). The files stay in git for development and CI.
+/tests            export-ignore
+/workbench        export-ignore
+/phpunit.xml.dist export-ignore
+/phpunit9.xml.dist export-ignore
+/testbench.yaml   export-ignore
+/.gitattributes   export-ignore
+/.gitignore       export-ignore

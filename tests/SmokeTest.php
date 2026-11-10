@@ -37,6 +37,37 @@ final class SmokeTest extends TestCase
         );
     }
 
+    public function test_public_metadata_points_at_the_public_repository(): void
+    {
+        $root = dirname(__DIR__);
+        $composer = json_decode((string) file_get_contents($root.'/composer.json'), true, 512, JSON_THROW_ON_ERROR);
+
+        $this->assertSame('https://github.com/skyhilam/watch-laravel', $composer['homepage']);
+        $this->assertSame('https://github.com/skyhilam/watch-laravel/issues', $composer['support']['issues']);
+        $this->assertSame('https://github.com/skyhilam/watch-laravel', $composer['support']['source']);
+        // require.illuminate/support is not asserted: each CI row narrows it with `composer require`.
+        $this->assertSame('^8.1', $composer['require']['php']);
+
+        $license = (string) file_get_contents($root.'/LICENSE');
+        $this->assertStringContainsString('MIT License', $license);
+        $this->assertStringContainsString($composer['authors'][0]['name'], $license, 'LICENSE holder matches composer.json authors');
+
+        $this->assertFileExists($root.'/README.md');
+    }
+
+    public function test_dist_archive_leaves_out_development_files(): void
+    {
+        $attributes = (string) file_get_contents(dirname(__DIR__).'/.gitattributes');
+
+        foreach (['/tests', '/workbench', '/phpunit.xml.dist', '/testbench.yaml'] as $path) {
+            $this->assertSame(
+                1,
+                preg_match('/^'.preg_quote($path, '/').'\s+export-ignore$/m', $attributes),
+                $path.' is export-ignore',
+            );
+        }
+    }
+
     public function test_timeouts_are_documented_as_untested_proposals(): void
     {
         $config = (string) file_get_contents(dirname(__DIR__).'/config/watch.php');
@@ -49,7 +80,13 @@ final class SmokeTest extends TestCase
 
     public function test_agent_doc_covers_supervision_isolation_and_untested_timeouts(): void
     {
-        $doc = (string) file_get_contents(dirname(__DIR__, 3).'/docs/agent.md');
+        $path = dirname(__DIR__, 3).'/docs/agent.md';
+        if (! is_file($path)) {
+            // The split public repository carries the package only, not the monorepo docs.
+            $this->markTestSkipped('docs/agent.md is only present in the monorepo checkout.');
+        }
+
+        $doc = (string) file_get_contents($path);
 
         $this->assertStringContainsString('## systemd 範例', $doc);
         $this->assertStringContainsString('ExecStart=/usr/bin/php artisan watch:agent', $doc);
