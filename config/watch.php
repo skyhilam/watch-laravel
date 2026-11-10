@@ -74,6 +74,36 @@ return [
 
     'capture_payload' => false,
 
+    // Query 亦預設唔收；開啟後同 payload 一樣先遮罩先離開來源。
+    'capture_query' => false,
+
+    /*
+    | Request 詳情：以下限額係提案起點，未實測，唔係效能承諾。
+    | 舊版已 publish config 缺少 capture／新 key，程式仍會逐項用呢啲預設。
+    | hostname/IP/ID 可能係個人或基建資料，按應用政策停用或遮罩。
+    */
+    'capture' => [
+        'hostname' => true, // gethostname()，false 標 disabled。
+        'path' => 'path', // 或 route_template；實際 path 可能包含 reset token。
+        'ip' => 'full', // full／masked（IPv4 /24、IPv6 /48）／off；跟 TrustProxies。
+        'memory' => [
+            'reset_peak' => false, // true 且 PHP 有 reset 函數先重置，會影響其他工具。
+        ],
+        'tags' => [], // 固定安全 tags；加衍生及 RequestContext tags，最多 20 個。
+        'user' => [
+            'enabled' => true, // 只讀已載入 guard/user，唔會解析登入或查 DB。
+            'guards' => [], // auth.defaults.guard 以外嘅 guard，最多合共 20 個。
+            'fields' => ['id'], // 只可 id/name/email；name/email 必須明確加入。
+        ],
+        'max_body_bytes' => 65536, // 先檢查 Content-Length／實際 body，超限唔解析。
+        'max_depth' => 6, // 容器層數；超限位置改成 [truncated]。
+        'max_array_items' => 50, // 每個 array/map 項數，包含截斷標記。
+        'max_string_bytes' => 2048, // 每個字串；唔會切斷 UTF-8。
+        'max_payload_bytes' => 16384, // 遮罩後 payload／query 各自 JSON 上限。
+        'max_header_bytes' => 1024, // 每個 header 合併後嘅值。
+        'max_envelope_bytes' => 65536, // 編碼後 request；依次丟 payload/query/headers。
+    ],
+
     /*
     |--------------------------------------------------------------------------
     | Log buffer limit
@@ -185,6 +215,7 @@ return [
         'central_url' => env('WATCH_CENTRAL_URL'),
         'project_key' => env('WATCH_PROJECT_KEY'),
         'batch_size' => 100,
+        'max_batch_bytes' => 900000, // 整個 {events:[...]} JSON；提案起點，未實測，細過中央 1 MiB。
         'request_timeout_ms' => 5000,
         'status_interval_seconds' => 30,
         'retry' => [

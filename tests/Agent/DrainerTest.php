@@ -50,7 +50,7 @@ final class DrainerTest extends TestCase
         parent::tearDown();
     }
 
-    private function drainer(FakeCentralClient $client, int $batchSize = 100): Drainer
+    private function drainer(FakeCentralClient $client, int $batchSize = 100, $maxBatchBytes = 900000): Drainer
     {
         return new Drainer(
             $this->spool,
@@ -62,6 +62,7 @@ final class DrainerTest extends TestCase
             new Backoff(1000, 8000, static fn (int $min, int $max): int => $max),
             $this->recorder,
             fn (): float => $this->now,
+            $maxBatchBytes,
         );
     }
 
@@ -313,4 +314,62 @@ final class DrainerTest extends TestCase
         $reporter->acknowledge();
         $this->assertSame(['agent_status'], array_column($reporter->build(null), 'type'));
     }
+    public function test_batches_stop_at_encoded_json_bytes_including_wrapper_and_unicode(): void
+    {
+        $events = $this->events(1, 'bytes');
+        $events[0]['payload'] = ['visible' => str_repeat('合成/"', 50)];
+        $limit = strlen(json_encode(['events' => $events], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE));
+        $this->spool->write($events);
+        $this->spool->write($events);
+        $client = new FakeCentralClient();
+        $drainer = $this->drainer($client, 100, $limit);
+        $this->assertSame(1, $drainer->drainOnce()['sent']);
+        $this->assertCount(1, $this->spool->files());
+        $this->assertSame($limit, strlen(json_encode(['events' => $client->eventsOfPost(0)], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)));
+        $this->assertSame(1, $drainer->drainOnce()['sent']);
+        $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_oversized_file_is_dropped_and_does_not_block_the_next_file(): void
+    {
+        $big = $this->events(2, 'oversized');
+        $big[0]['payload'] = ['body' => str_repeat('x', 2000)];
+        $this->spool->write($big);
+        $this->spool->write($this->events(1, 'small'));
+        $client = new FakeCentralClient();
+        $result = $this->drainer($client, 100, 500)->drainOnce();
+        $this->assertSame(1, $result['sent']);
+        $this->assertSame(2, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame(['small-0'], array_column($client->eventsOfPost(0), 'ingest_id'));
+        $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_single_file_that_only_exceeds_limit_after_json_wrapper_is_dropped(): void
+    {
+        $events = $this->events(1, 'wrapper');
+        $this->spool->write($events);
+        $client = new FakeCentralClient();
+        $limit = $this->spool->files()[0]->bytes;
+        $result = $this->drainer($client, 100, $limit)->drainOnce();
+        $this->assertSame(Drainer::IDLE, $result['outcome']);
+        $this->assertSame([], $client->posts);
+        $this->assertSame(1, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_missing_or_invalid_batch_bytes_uses_bounded_default(): void
+    {
+        foreach ([null, 0, -1, '1', false, [], 1.5] as $invalid) {
+            $events = $this->events(1, 'default');
+            $events[0]['payload'] = ['body' => str_repeat('x', 460000)];
+            $this->spool->write($events);
+            $this->spool->write($events);
+            $client = new FakeCentralClient();
+            $drainer = $this->drainer($client, 100, $invalid);
+            $this->assertSame(1, $drainer->drainOnce()['sent']);
+            $this->assertSame(1, $drainer->drainOnce()['sent']);
+            $this->assertSame([], $this->spool->files());
+        }
+    }
+
 }

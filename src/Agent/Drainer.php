@@ -6,6 +6,7 @@ namespace Watch\Laravel\Agent;
 
 use Closure;
 use Throwable;
+use Watch\Laravel\Capture\Limits;
 use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Contracts\CentralClient;
@@ -44,6 +45,8 @@ final class Drainer
     /** @var Closure(): float */
     private readonly Closure $clock;
 
+    private $maxBatchBytes;
+
     public function __construct(
         private readonly FileSpool $spool,
         private readonly CentralClient $client,
@@ -54,8 +57,10 @@ final class Drainer
         private readonly Backoff $backoff,
         private readonly Recorder $recorder,
         ?Closure $clock = null,
+        $maxBatchBytes = 900000
     ) {
         $this->clock = $clock ?? static fn (): float => microtime(true);
+        $this->maxBatchBytes = Limits::positive($maxBatchBytes, 900000);
     }
 
     public function ready(): bool
@@ -103,10 +108,27 @@ final class Drainer
                 break;
             }
 
-            $files[] = $file;
-            foreach ($this->spool->read($file) as $event) {
-                $events[] = $event;
+            // Do not load an obviously oversized file into memory. Account for
+            // the JSON wrapper too in the exact check after decoding below.
+            if ($file->bytes > $this->maxBatchBytes) {
+                $this->spool->delete($file);
+                $this->recorder->add(Reason::TRANSPORT_ERROR, $file->events);
+                continue;
             }
+            $incoming = $this->spool->read($file);
+            $single = $this->encodedBytes($incoming);
+            if ($single === null || $single > $this->maxBatchBytes) {
+                $this->spool->delete($file);
+                $this->recorder->add(Reason::TRANSPORT_ERROR, max(1, count($incoming)));
+                continue;
+            }
+            $combined = array_merge($events, $incoming);
+            $bytes = $this->encodedBytes($combined);
+            if ($files !== [] && ($bytes === null || $bytes > $this->maxBatchBytes)) {
+                break;
+            }
+            $files[] = $file;
+            $events = $combined;
 
             if (count($events) >= $this->batchSize) {
                 break;
@@ -197,6 +219,13 @@ final class Drainer
         $this->lastSuccessAt = gmdate('Y-m-d\TH:i:s\Z', (int) ($this->clock)());
 
         return self::SENT;
+    }
+
+    private function encodedBytes(array $events): ?int
+    {
+        $body = json_encode(['events' => $events], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+
+        return is_string($body) ? strlen($body) : null;
     }
 
     /**

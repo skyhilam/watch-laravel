@@ -75,6 +75,11 @@ final class Redactor
         return $this->redactArray($value, $this->sensitiveKeys());
     }
 
+    public function isSensitiveKey(string $key): bool
+    {
+        return $this->sensitive($key, $this->sensitiveKeys());
+    }
+
     /**
      * @param  array<mixed>  $headers
      * @return array<string, string>

@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace Watch\Laravel\Http;
 
 use Illuminate\Contracts\Container\Container;
+use Illuminate\Container\Container as CurrentContainer;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
+use Watch\Laravel\Capture\Limits;
+use Watch\Laravel\Capture\MemoryCapture;
+use Watch\Laravel\Capture\RequestDetails;
 use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Context\RequestContext;
@@ -48,6 +52,11 @@ final class RequestCapturer
             $parsed['traceparent'] ?? null,
             $logLimit,
         );
+        try {
+            $this->requestContainer()->make(MemoryCapture::class)->begin($this->context());
+        } catch (Throwable $e) {
+            $this->context()->setMemoryScope('error');
+        }
     }
 
     public function finish(Request $request, Response $response): void
@@ -93,17 +102,36 @@ final class RequestCapturer
             return;
         }
 
-        $events = [
-            $this->envelopes->request(
-                $context,
-                $request->getMethod(),
-                $this->routeName($request),
-                $this->pathWithoutQuery($request),
-                $response->getStatusCode(),
-                $this->redactor->headers($request->headers->all()),
-                $this->payload($request),
-            ),
-        ];
+        $container = $this->requestContainer();
+        $details = $container->make(RequestDetails::class)->capture($container, $context, $request, $response->getStatusCode());
+        foreach (['controller_action', 'middleware'] as $key) {
+            if (array_key_exists($key, $details) && $details[$key] === null) {
+                // Optional v1 details use omission for unknown route metadata.
+                unset($details[$key]);
+            }
+        }
+        $event = $this->envelopes->request(
+            $context,
+            $request->getMethod(),
+            $details['route'],
+            $details['path'],
+            $response->getStatusCode(),
+            is_array($details['headers']) ? $details['headers'] : [],
+            $details['payload'],
+            $details
+        );
+        // Query is an object in protocol v1, including the captured empty map.
+        if (isset($event['query']) && is_array($event['query'])) {
+            $event['query'] = (object) $event['query'];
+        }
+        $event = $container->make(Limits::class)->envelope($event);
+        $events = [];
+        if ($event === []) {
+            $this->recorder->add(Reason::TRANSPORT_ERROR);
+            $events[] = $this->envelopes->completeness($context, Reason::TRANSPORT_ERROR, 1, true);
+        } else {
+            $events[] = $event;
+        }
 
         foreach ($context->logs() as $entry) {
             $events[] = $this->envelopes->log($context, $entry);
@@ -139,63 +167,6 @@ final class RequestCapturer
         }
     }
 
-    private function payload(Request $request): mixed
-    {
-        if (! $this->truthy(config('watch.capture_payload'), false)) {
-            return null;
-        }
-
-        $body = $request->isJson()
-            ? $request->json()->all()
-            : $request->request->all();
-
-        // Laravel 8's Request::createFromBase points the request bag at the
-        // query bag for GET and HEAD. The query string is not the body.
-        if (
-            ! $request->isJson()
-            && in_array(strtoupper($request->getRealMethod()), ['GET', 'HEAD'], true)
-            && $body === $request->query->all()
-        ) {
-            $body = [];
-        }
-
-        if (! is_array($body)) {
-            return null;
-        }
-
-        return $this->redactor->redact($body);
-    }
-
-    private function pathWithoutQuery(Request $request): string
-    {
-        $path = $request->getPathInfo();
-        $query = strpos($path, '?');
-        if ($query !== false) {
-            $path = substr($path, 0, $query);
-        }
-
-        if ($path === '') {
-            return '/';
-        }
-
-        return str_starts_with($path, '/') ? $path : '/'.$path;
-    }
-
-    private function routeName(Request $request): ?string
-    {
-        $route = $request->route();
-        if (! is_object($route) || ! method_exists($route, 'getName')) {
-            return null;
-        }
-
-        $name = $route->getName();
-        if (! is_string($name) || $name === '') {
-            return null;
-        }
-
-        return $name;
-    }
-
     private function truthy(mixed $value, bool $default): bool
     {
         if ($value === null) {
@@ -220,5 +191,12 @@ final class RequestCapturer
     private function context(): RequestContext
     {
         return RequestContext::current($this->container);
+    }
+
+    private function requestContainer(): Container
+    {
+        $current = CurrentContainer::getInstance();
+
+        return $current->bound(RequestContext::class) ? $current : $this->container;
     }
 }

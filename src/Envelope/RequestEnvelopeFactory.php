@@ -20,7 +20,8 @@ final class RequestEnvelopeFactory
         string $path,
         int $status,
         array $headers,
-        mixed $payload,
+        $payload,
+        array $details = []
     ): array {
         $event = [
             'type' => 'request',
@@ -38,7 +39,7 @@ final class RequestEnvelopeFactory
             'sampled' => true,
         ];
 
-        return $this->withTrace($event, $context);
+        return $this->withTrace(array_merge($event, $details), $context);
     }
 
     /**

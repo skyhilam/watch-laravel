@@ -16,6 +16,7 @@ use Watch\Laravel\Agent\Quota;
 use Watch\Laravel\Agent\Receiver;
 use Watch\Laravel\Agent\Runtime;
 use Watch\Laravel\Agent\StatusReporter;
+use Watch\Laravel\Capture\Limits;
 use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Contracts\CentralClient;
@@ -74,6 +75,8 @@ final class AgentCommand extends Command
             max(1, $this->int(config('watch.agent.request_timeout_ms'), 5000)),
             new Backoff(max(1, $this->int($retry['base_ms'] ?? 500, 500)), max(1, $this->int($retry['max_ms'] ?? 30000, 30000))),
             $recorder,
+            null,
+            Limits::positive(config('watch.agent.max_batch_bytes', 900000), 900000)
         );
         $status = new StatusReporter($recorder, $spool, $ledger);
 

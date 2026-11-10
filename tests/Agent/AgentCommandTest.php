@@ -237,4 +237,38 @@ final class AgentCommandTest extends TestCase
         $this->assertCount(1, $this->spoolFiles());
         $this->assertSame('not a socket', file_get_contents($this->tempDir.'/agent.sock'));
     }
+
+    public function test_old_published_agent_config_defaults_to_byte_bounded_batches(): void
+    {
+        $old = config('watch');
+        unset($old['capture'], $old['agent']['max_batch_bytes']);
+        config(['watch' => $old]);
+        $spool = $this->app->make(FileSpool::class);
+        for ($i = 0; $i < 2; $i++) {
+            $spool->write([['type' => 'request', 'ingest_id' => 'synthetic-'.$i, 'payload' => ['body' => str_repeat('x', 460000)]]]);
+        }
+        $client = $this->central();
+        [$exit, $output] = $this->runCommand('watch:agent', ['--once' => true]);
+        $this->assertSame(0, $exit, $output);
+        $this->assertCount(3, $client->posts, 'two byte-bounded batches plus heartbeat');
+        $this->assertCount(1, $client->eventsOfPost(0));
+        $this->assertCount(1, $client->eventsOfPost(1));
+        $this->assertSame([], $this->spoolFiles());
+    }
+
+    public function test_agent_passes_configured_max_batch_bytes_to_drainer(): void
+    {
+        config(['watch.agent.max_batch_bytes' => 300]);
+        $spool = $this->app->make(FileSpool::class);
+        for ($i = 0; $i < 2; $i++) {
+            $spool->write([['type' => 'request', 'ingest_id' => 'synthetic-'.$i, 'payload' => ['body' => str_repeat('x', 150)]]]);
+        }
+        $client = $this->central();
+        [$exit, $output] = $this->runCommand('watch:agent', ['--once' => true]);
+        $this->assertSame(0, $exit, $output);
+        $this->assertCount(3, $client->posts);
+        $this->assertCount(1, $client->eventsOfPost(0));
+        $this->assertCount(1, $client->eventsOfPost(1));
+        $this->assertSame([], $this->spoolFiles());
+    }
 }

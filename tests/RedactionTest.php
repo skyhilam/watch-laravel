@@ -141,4 +141,24 @@ final class RedactionTest extends TestCase
             $this->assertSame('https://app.example.test:8443/orders, /orders', $headers[strtolower($name)]);
         }
     }
+    public function test_query_uses_the_same_additive_redaction_policy_as_payload_and_headers(): void
+    {
+        config(['watch.capture_query' => true, 'watch.redact' => ['synthetic-private-field']]);
+        $this->withHeaders([
+            'Referer' => 'https://example.test/?token=synthetic-referer-secret#fragment',
+            'Synthetic-Private-Field' => 'synthetic-header-secret',
+        ])->get('/query?profile[SyNtHeTiC_PRIVATE_field]=synthetic-query-secret&profile[Access-Token]=synthetic-token-secret&visible=safe');
+        $event = $this->transport->ofType('request')[0];
+        $query = (array) $event['query'];
+        $this->assertSame('safe', $query['visible']);
+        $this->assertSame('[redacted]', $query['profile']['SyNtHeTiC_PRIVATE_field']);
+        $this->assertSame('[redacted]', $query['profile']['Access-Token']);
+        $this->assertSame('[redacted]', $event['headers']['synthetic-private-field']);
+        $this->assertSame('https://example.test/', $event['headers']['referer']);
+        $json = json_encode($event, JSON_THROW_ON_ERROR);
+        foreach (['synthetic-referer-secret', 'synthetic-header-secret', 'synthetic-query-secret', 'synthetic-token-secret', '?token='] as $secret) {
+            $this->assertStringNotContainsString($secret, $json);
+        }
+    }
+
 }

@@ -16,3 +16,6 @@ Route::get('/watch-e2e', function () {
 
     return response('watch-e2e-ok', 200);
 })->name('watch.e2e.ping');
+
+$router = app('router');
+require __DIR__.'/request-detail.php';

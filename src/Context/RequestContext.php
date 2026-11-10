@@ -32,6 +32,10 @@ final class RequestContext
 
     private int $logLimit = 200;
 
+    private $tags = [];
+
+    private $memoryScope = 'process';
+
     /**
      * The context of the request being handled right now.
      *
@@ -68,6 +72,8 @@ final class RequestContext
         $this->logs = [];
         $this->logOverflow = 0;
         $this->logLimit = 200;
+        $this->tags = [];
+        $this->memoryScope = 'process';
     }
 
     public function begin(
@@ -165,5 +171,27 @@ final class RequestContext
     public function logOverflow(): int
     {
         return $this->logOverflow;
+    }
+
+    public function addTag($tag): void
+    {
+        if ($this->active && count($this->tags) < 20 && \Watch\Laravel\Capture\Tags::valid($tag) && ! in_array($tag, $this->tags, true)) {
+            $this->tags[] = $tag;
+        }
+    }
+
+    public function tags(): array
+    {
+        return $this->tags;
+    }
+
+    public function setMemoryScope(string $scope): void
+    {
+        $this->memoryScope = $scope;
+    }
+
+    public function memoryScope(): string
+    {
+        return $this->memoryScope;
     }
 }
