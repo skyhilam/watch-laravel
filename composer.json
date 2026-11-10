@@ -1,0 +1,36 @@
+{
+    "name": "skyhilam/watch-laravel",
+    "description": "Fail-open capture package for the Watch request explorer. Redacts before data leaves the source app.",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^12.0 || ^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0 || ^11.0",
+        "phpunit/phpunit": "^11.5.50 || ^12.5.8 || ^13.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Watch\\Laravel\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Watch\\Laravel\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Watch\\Laravel\\WatchServiceProvider"
+            ]
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
