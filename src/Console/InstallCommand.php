@@ -29,8 +29,9 @@ final class InstallCommand extends Command
         $this->newLine();
         $this->line('Watch 設定檔已處理（冇 --force 就唔會覆寫現有 config/watch.php）。');
         $this->line('Agent 設定指引（呢個 command 唔會啟動 agent）：');
-        $this->line('- 喺 .env 設定 WATCH_TOKEN（由 central 嘅 /projects 頁複製）就用得。');
-        $this->line('- 已設定嘅 WATCH_CENTRAL_URL、WATCH_PROJECT_KEY、WATCH_AGENT_ENDPOINT 會蓋過 WATCH_TOKEN。');
+        $this->line('- 喺 .env 設定 WATCH_PROJECT_KEY 就用得。Central 預設 https://watch.skyhilam.com。');
+        $this->line('- 自架 central 先要設 WATCH_CENTRAL_URL，只填 base URL（例如 https://watch.example.com），唔使加 /api/v1/ingest。');
+        $this->line('- 舊嘅 WATCH_TOKEN 仍然有效；明確設定嘅 WATCH_CENTRAL_URL、WATCH_PROJECT_KEY、WATCH_AGENT_ENDPOINT 會蓋過佢。');
         $this->line('- 用獨立長駐行程跑 php artisan watch:agent，由 systemd 或 Supervisor 監管。');
         $this->line('- 唔好放喺 PHP-FPM、Octane worker、或者業務 queue worker 入面。');
         $this->line('- 只聽 Unix socket，或者只綁 127.0.0.1。');

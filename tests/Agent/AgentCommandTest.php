@@ -127,6 +127,19 @@ final class AgentCommandTest extends TestCase
         $this->assertSame('http://127.0.0.1:8000/api/v1/ingest', $client->posts[0]['url']);
     }
 
+    public function test_base_central_url_posts_to_the_ingest_path(): void
+    {
+        config()->set('watch.agent.central_url', 'https://watch.skyhilam.com');
+        $client = $this->central();
+
+        [$exit, $output] = $this->runCommand('watch:agent', ['--once' => true]);
+
+        $this->assertSame(0, $exit, $output);
+        $this->assertStringContainsString('central https://watch.skyhilam.com', $output);
+        $this->assertCount(1, $client->posts);
+        $this->assertSame('https://watch.skyhilam.com/api/v1/ingest', $client->posts[0]['url']);
+    }
+
     public function test_once_drains_the_spool_with_the_bearer_key_and_exits(): void
     {
         $spool = $this->app->make(FileSpool::class);

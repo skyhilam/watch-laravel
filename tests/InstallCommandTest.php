@@ -44,6 +44,8 @@ final class InstallCommandTest extends TestCase
         $this->assertSame(0, Artisan::call('watch:install'));
         $output = Artisan::output();
         $this->assertStringContainsString('watch:agent', $output);
+        $this->assertStringContainsString('WATCH_PROJECT_KEY', $output);
+        $this->assertStringContainsString('https://watch.skyhilam.com', $output);
         $this->assertStringContainsString('WATCH_TOKEN', $output);
         $this->assertStringContainsString('127.0.0.1', $output);
         $this->assertStringContainsString('未量測提案', $output);

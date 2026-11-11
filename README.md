@@ -12,11 +12,19 @@ Watch 嘅來源端套件。裝入 Laravel app 之後，每個 HTTP request 同�
 composer require skyhilam/watch-laravel
 ```
 
-`.env` 加一行。`WATCH_TOKEN` 喺 Watch central 嘅項目頁複製：
+`.env` 加一行 project key：
 
 ```dotenv
-WATCH_TOKEN=wt_xxxxxxxxxxxxxxxx
+WATCH_PROJECT_KEY=wk_xxxxxxxxxxxxxxxx
 ```
+
+Central 預設係 `https://watch.skyhilam.com`。自架 central 先要再加 `WATCH_CENTRAL_URL`，只填 base URL，唔使加 path：
+
+```dotenv
+WATCH_CENTRAL_URL=https://watch.example.com
+```
+
+Agent 會自己加 `/api/v1/ingest`。舊設定已經寫埋 `/api/v1/ingest` 嘅照用。
 
 Service provider 靠 package discovery 自動載入，唔使改 `config/app.php`。
 
@@ -47,43 +55,26 @@ php artisan watch:install
 - Monolog 2（Laravel 8、9）同 Monolog 3（Laravel 10 或以上）都得。
 - Laravel 8 至 11 已經冇官方安全維護。套件裝得落去，唔代表呢啲框架版本仲有安全修補。
 
-## `WATCH_TOKEN`
+## 設定優先次序
 
-一個字串入面有 central 網址同 project key。格式：
-
-```
-wt_ + base64url（冇 padding）( {"v":1,"url":"https://watch.example.com","key":"<project key>"} )
-```
-
-- `v` 一定係 `1`。
-- `url` 係 central 嘅 base URL，冇尾 `/`。
-- `key` 係該 project／environment 嘅 key。
-- 可以有 `endpoint` 字串，用嚟指定本機 agent endpoint。
-
-套件由 token 填以下設定：
-
-| 設定 | 值 |
+| 設定 | 來源（由高到低） |
 | --- | --- |
-| `watch.agent.central_url` | `url` 加 `/api/v1/ingest` |
-| `watch.agent.project_key` | `key` |
-| `watch.transport.endpoint` | token 有 `endpoint` 先填。冇就用預設 Unix socket `storage/watch/agent.sock` |
+| `watch.agent.project_key` | `WATCH_PROJECT_KEY` → `WATCH_TOKEN` 入面嘅 key |
+| `watch.agent.central_url` | `WATCH_CENTRAL_URL`（base URL）→ `WATCH_TOKEN` 入面嘅 url → `https://watch.skyhilam.com` |
+| `watch.transport.endpoint` | `WATCH_AGENT_ENDPOINT` → `WATCH_TOKEN` 入面嘅 endpoint → Unix socket `storage/watch/agent.sock` |
+| `watch.spool.path` | `WATCH_SPOOL_PATH` → `storage/watch/spool` |
 
-Token 入面有 project key，當密碼咁處理：放 `.env`，唔好 commit。
+已發佈嘅 `config/watch.php` 入面唔係 `null` 或空字串嘅值，同環境變數一樣優先。
 
-### 明確設定優先
+Project key 當密碼咁處理：放 `.env`，唔好 commit。
 
-以下環境變數仍然有效。有設定，或者已發佈嘅 `config/watch.php` 入面相應嘅值唔係 `null` 或空字串，就蓋過 token 推算出嚟嘅值：
+### 舊方式：`WATCH_TOKEN`
 
-| 環境變數 | 蓋過 |
-| --- | --- |
-| `WATCH_CENTRAL_URL` | 完整 ingest 位址，例如 `https://watch.example.com/api/v1/ingest` |
-| `WATCH_PROJECT_KEY` | project key |
-| `WATCH_AGENT_ENDPOINT` | 本機 agent endpoint，`unix:///path/agent.sock` 或者 `tcp://127.0.0.1:9427` |
-| `WATCH_SPOOL_PATH` | spool 目錄，預設 `storage/watch/spool` |
+仍然支援。格式係 `wt_` + base64url（冇 padding）嘅 `{"v":1,"url":"https://watch.example.com","key":"<project key>"}`，可以有 `endpoint`。`url` 冇尾 `/`，`v` 一定係 `1`。
 
 ## Fail-open
 
-- 冇設定 `WATCH_TOKEN`：app 照常起，唔記 warning。
+- 冇設定 `WATCH_PROJECT_KEY`（亦冇 `WATCH_TOKEN`）：app 照常起，唔記 warning；`watch:agent` 會拒絕啟動。
 - `WATCH_TOKEN` 格式錯：略過個 token，app 照常起。每個 process 只記一次 warning，warning 唔包含 token 或 key。
 - 連唔到 agent 或者寫入超時：事件改寫入本機 spool，之後由 agent 補送。
 - Spool 滿、寫唔到、或者過期：事件會 drop，並按原因計數報上 central。唔會靜默當成已錄。

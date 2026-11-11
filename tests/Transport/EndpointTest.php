@@ -100,6 +100,26 @@ final class EndpointTest extends TestCase
         $this->assertFalse(Loopback::isLoopbackHost(''));
     }
 
+    public function test_central_ingest_url_appends_the_ingest_path_to_a_base_url(): void
+    {
+        $this->assertSame('https://watch.skyhilam.com/api/v1/ingest', CentralUrl::ingest('https://watch.skyhilam.com'));
+        $this->assertSame('https://watch.skyhilam.com/api/v1/ingest', CentralUrl::ingest('https://watch.skyhilam.com/'));
+        $this->assertSame('https://example.com/watch/api/v1/ingest', CentralUrl::ingest('https://example.com/watch'));
+        $this->assertSame('http://127.0.0.1:8000/api/v1/ingest', CentralUrl::ingest('http://127.0.0.1:8000'));
+        // Older installs set the full ingest URL; it is used unchanged.
+        $this->assertSame('https://watch.example.com/api/v1/ingest', CentralUrl::ingest('https://watch.example.com/api/v1/ingest'));
+        $this->assertSame('https://watch.example.com/api/v1/ingest', CentralUrl::ingest('https://watch.example.com/api/v1/ingest/'));
+
+        foreach (['http://watch.example.com', '', null] as $bad) {
+            try {
+                CentralUrl::ingest($bad);
+                $this->fail(var_export($bad, true).' should have been refused');
+            } catch (InvalidArgumentException) {
+                $this->addToAssertionCount(1);
+            }
+        }
+    }
+
     public function test_central_url_requires_https_unless_loopback(): void
     {
         $this->assertSame('https://watch.example.com/api/v1/ingest', CentralUrl::validate('https://watch.example.com/api/v1/ingest'));

@@ -9,6 +9,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Contracts\Http\Kernel;
 use Illuminate\Support\ServiceProvider;
 use Throwable;
+use Watch\Laravel\Agent\CentralUrl;
 use Watch\Laravel\Agent\Runtime;
 use Watch\Laravel\Agent\StreamCentralClient;
 use Watch\Laravel\Completeness\Recorder;
@@ -52,6 +53,7 @@ class WatchServiceProvider extends ServiceProvider
         );
 
         $this->applyWatchToken();
+        $this->applyDefaultCentralUrl();
 
         $this->app->scoped(RequestContext::class, static fn (): RequestContext => new RequestContext());
         $this->app->singleton(Redactor::class);
@@ -168,7 +170,7 @@ class WatchServiceProvider extends ServiceProvider
                 return;
             }
 
-            $this->fillConfigIfEmpty('watch.agent.central_url', $parsed['url'].'/api/v1/ingest');
+            $this->fillConfigIfEmpty('watch.agent.central_url', $parsed['url']);
             $this->fillConfigIfEmpty('watch.agent.project_key', $parsed['key']);
 
             if (is_string($parsed['endpoint']) && $parsed['endpoint'] !== '') {
@@ -176,6 +178,18 @@ class WatchServiceProvider extends ServiceProvider
             }
         } catch (Throwable) {
             $this->warnInvalidTokenOnce();
+        }
+    }
+
+    /**
+     * WATCH_CENTRAL_URL (or the token's url) wins; otherwise the hosted central.
+     */
+    private function applyDefaultCentralUrl(): void
+    {
+        try {
+            $this->fillConfigIfEmpty('watch.agent.central_url', CentralUrl::DEFAULT_BASE);
+        } catch (Throwable) {
+            // Fail-open: the agent reports a missing central_url when it starts.
         }
     }
 

@@ -117,7 +117,7 @@ final class SmokeTest extends TestCase
         $this->assertSame(50 * 1024 * 1024, config('watch.spool.max_bytes'));
         $this->assertSame(1000, config('watch.spool.max_files'));
         $this->assertSame(86400, config('watch.spool.max_age_seconds'));
-        $this->assertNull(config('watch.agent.central_url'));
+        $this->assertSame('https://watch.skyhilam.com', config('watch.agent.central_url'));
         $this->assertNull(config('watch.agent.project_key'));
         $this->assertSame(100, config('watch.agent.batch_size'));
         $this->assertSame(5000, config('watch.agent.request_timeout_ms'));

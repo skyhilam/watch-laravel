@@ -43,7 +43,7 @@ final class AgentCommand extends Command
 
         try {
             $endpoint = Endpoint::fromConfig(config('watch.transport.endpoint'), WatchServiceProvider::defaultSocketPath());
-            $centralUrl = CentralUrl::validate(config('watch.agent.central_url'));
+            $centralUrl = CentralUrl::ingest(config('watch.agent.central_url'));
         } catch (InvalidArgumentException $e) {
             $this->error('watch:agent refused to start: '.$e->getMessage());
 

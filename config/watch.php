@@ -117,14 +117,14 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Install token
+    | Install token（舊方式，仍然支援）
     |--------------------------------------------------------------------------
     |
-    | 一個 WATCH_TOKEN 就夠安裝。格式係 wt_ 加上 base64url（冇 padding）嘅
+    | 而家 .env 只需要 WATCH_PROJECT_KEY，central 預設 https://watch.skyhilam.com。
+    | WATCH_TOKEN 照舊接受：格式係 wt_ 加上 base64url（冇 padding）嘅
     | json_encode(['v' => 1, 'url' => '<central base URL，冇尾 />', 'key' => '<project key>'], JSON_UNESCAPED_SLASHES)。
     | 可以有 endpoint 字串。套件只會喺下面嘅值仲係 null 或者空字串時先填：
-    | central_url = url + /api/v1/ingest、project_key = key、
-    | transport.endpoint = endpoint（token 有先填）。
+    | central_url = url、project_key = key、transport.endpoint = endpoint（token 有先填）。
     |
     | WATCH_CENTRAL_URL、WATCH_PROJECT_KEY、WATCH_AGENT_ENDPOINT，或者已發佈
     | config 入面唔係 null／空字串嘅值，一律優先。Token 格式錯就略過，每個
@@ -195,8 +195,13 @@ return [
     | Octane worker、或者業務 queue worker 入面。只准喺 CLI SAPI 跑。
     | 部署範例喺 docs/agent.md。
     |
-    | central_url 必須係 https；明文 http 只可以係 loopback。否則拒絕啟動。
-    | project_key 用 Bearer header 送出，放喺 .env，唔好寫入 repo。
+    | central_url 係 central 嘅 base URL（冇 path），例如 https://watch.example.com。
+    | Agent 自動加 /api/v1/ingest；已經以 /api/v1/ingest 結尾嘅舊設定照用。
+    | 冇設定（WATCH_CENTRAL_URL 同 WATCH_TOKEN 都冇）就用 https://watch.skyhilam.com。
+    | 必須係 https；明文 http 只可以係 loopback。否則拒絕啟動。
+    |
+    | project_key（WATCH_PROJECT_KEY）係唯一必填。佢用 Bearer header 送出，
+    | 放喺 .env，唔好寫入 repo。
     |
     | 重試係指數 backoff + jitter：delay 由 retry.base_ms 開始每次加倍，上限係
     | retry.max_ms；重試時 ingest_id 唔變。中央答 400／413／422（批次本身有

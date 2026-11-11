@@ -84,7 +84,7 @@ final class WatchTokenTest extends TestCase
             'WATCH_TOKEN' => self::FIXTURE_TOKEN,
         ]);
 
-        $this->assertSame('https://watch.example.com/api/v1/ingest', config('watch.agent.central_url'));
+        $this->assertSame('https://watch.example.com', config('watch.agent.central_url'));
         $this->assertSame(self::PROJECT_KEY, config('watch.agent.project_key'));
         $this->assertNull(config('watch.transport.endpoint'));
         $this->assertSame([], $this->tokenWarnings());
@@ -121,9 +121,30 @@ final class WatchTokenTest extends TestCase
             'WATCH_AGENT_ENDPOINT' => '',
         ]);
 
-        $this->assertSame('https://watch.example.com/api/v1/ingest', config('watch.agent.central_url'));
+        $this->assertSame('https://watch.example.com', config('watch.agent.central_url'));
         $this->assertSame(self::PROJECT_KEY, config('watch.agent.project_key'));
         $this->assertSame('unix:///from-token.sock', config('watch.transport.endpoint'));
+    }
+
+    public function test_project_key_alone_uses_the_default_central(): void
+    {
+        $this->bootWith([
+            'WATCH_PROJECT_KEY' => 'wk_only_the_key',
+        ]);
+
+        $this->assertSame('https://watch.skyhilam.com', config('watch.agent.central_url'));
+        $this->assertSame('wk_only_the_key', config('watch.agent.project_key'));
+        $this->assertSame([], $this->tokenWarnings());
+    }
+
+    public function test_explicit_central_base_url_overrides_the_default(): void
+    {
+        $this->bootWith([
+            'WATCH_CENTRAL_URL' => 'https://self-hosted.example',
+            'WATCH_PROJECT_KEY' => 'wk_only_the_key',
+        ]);
+
+        $this->assertSame('https://self-hosted.example', config('watch.agent.central_url'));
     }
 
     public function test_invalid_token_fails_open_without_changing_the_http_response(): void
@@ -137,7 +158,7 @@ final class WatchTokenTest extends TestCase
         $this->assertSame(200, $response->getStatusCode());
         $this->assertSame('ok', $response->getContent());
         $this->assertSame('kept', $response->headers->get('X-App'));
-        $this->assertNull(config('watch.agent.central_url'));
+        $this->assertSame('https://watch.skyhilam.com', config('watch.agent.central_url'), 'a bad token falls back to the default central');
         $this->assertNull(config('watch.agent.project_key'));
     }
 
@@ -178,7 +199,7 @@ final class WatchTokenTest extends TestCase
         $this->assertSame('ok', $response->getContent());
         $this->assertSame('kept', $response->headers->get('X-App'));
         $this->assertNull(config('watch.token'));
-        $this->assertNull(config('watch.agent.central_url'));
+        $this->assertSame('https://watch.skyhilam.com', config('watch.agent.central_url'));
         $this->assertNull(config('watch.agent.project_key'));
         $this->assertSame([], $this->tokenWarnings());
     }
