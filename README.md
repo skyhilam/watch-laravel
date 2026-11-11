@@ -68,6 +68,17 @@ php artisan watch:install
 
 Project key 當密碼咁處理：放 `.env`，唔好 commit。
 
+### 可選：錄 payload／query
+
+Request 詳情頁嘅 payload（request body）同 query 預設唔收。要睇就喺 `.env` 加：
+
+```dotenv
+WATCH_CAPTURE_PAYLOAD=true
+WATCH_CAPTURE_QUERY=true
+```
+
+開咗之後仍然先按 `redact` 遮罩（`password`、`_token` 等），再離開 app。改完記得 `php artisan config:cache`（或 `optimize`）同重啟 worker。
+
 ### 舊方式：`WATCH_TOKEN`
 
 仍然支援。格式係 `wt_` + base64url（冇 padding）嘅 `{"v":1,"url":"https://watch.example.com","key":"<project key>"}`，可以有 `endpoint`。`url` 冇尾 `/`，`v` 一定係 `1`。

@@ -69,13 +69,14 @@ return [
     |
     | Request payload 預設不錄。開啟之後仍然先遮罩，先可以離開來源 app。
     | Query string 唔會寫入 path，亦唔會當成 payload。
+    | .env 用 WATCH_CAPTURE_PAYLOAD=true 開啟（true／1／on／yes 都得）。
     |
     */
 
-    'capture_payload' => false,
+    'capture_payload' => filter_var(env('WATCH_CAPTURE_PAYLOAD', false), FILTER_VALIDATE_BOOLEAN),
 
-    // Query 亦預設唔收；開啟後同 payload 一樣先遮罩先離開來源。
-    'capture_query' => false,
+    // Query 亦預設唔收；WATCH_CAPTURE_QUERY=true 開啟，同 payload 一樣先遮罩先離開來源。
+    'capture_query' => filter_var(env('WATCH_CAPTURE_QUERY', false), FILTER_VALIDATE_BOOLEAN),
 
     /*
     | Request 詳情：以下限額係提案起點，未實測，唔係效能承諾。
