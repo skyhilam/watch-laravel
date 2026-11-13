@@ -14,6 +14,7 @@ use Watch\Laravel\Contracts\Flushable;
 use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Spool\DropLedger;
 use Watch\Laravel\Spool\FileSpool;
+use Watch\Laravel\Spool\GitIgnore;
 use Watch\Laravel\Spool\Ndjson;
 
 /**
@@ -24,11 +25,18 @@ use Watch\Laravel\Spool\Ndjson;
  * request ends right after this runs). The agent reports the ledger to central
  * as completeness events. A count the ledger refused stays in memory and is
  * retried on the next send or flush.
+ *
+ * When the spool is disabled (tests, unless watch.spool.in_tests is on), drops
+ * stay in the recorder and $pending only. No spool directory or ledger file is
+ * created. The first such drop still ensures a .gitignore in package default
+ * directories that already exist, so ndjson left by an older release is ignored.
  */
 final class AgentTransport implements Transport, Flushable
 {
     /** @var array<string, int> */
     private array $pending = [];
+
+    private bool $defaultGitIgnoreEnsured = false;
 
     /**
      * @param Closure(): AgentSocket $socket Built per send, so a refused endpoint fails that send and not the boot.
@@ -38,6 +46,8 @@ final class AgentTransport implements Transport, Flushable
         private readonly FileSpool $spool,
         private readonly DropLedger $ledger,
         private readonly Recorder $recorder,
+        private readonly bool $spoolEnabled = true,
+        private readonly ?GitIgnore $gitignore = null,
     ) {}
 
     public function send(array $events): void
@@ -75,6 +85,13 @@ final class AgentTransport implements Transport, Flushable
             $this->recorder->add(Reason::AGENT_UNREACHABLE);
         }
 
+        if (! $this->spoolEnabled) {
+            $this->recorder->add(Reason::SPOOL_DISABLED_TESTING, $count);
+            $this->drop(Reason::SPOOL_DISABLED_TESTING, $count);
+
+            return;
+        }
+
         // The spool counts its own refusals in the recorder.
         $reason = $this->spool->writePayload($encoded['payload'], $count);
         if ($reason !== null) {
@@ -84,7 +101,7 @@ final class AgentTransport implements Transport, Flushable
 
     public function flush(): void
     {
-        if ($this->pending === []) {
+        if (! $this->spoolEnabled || $this->pending === []) {
             return;
         }
 
@@ -114,6 +131,31 @@ final class AgentTransport implements Transport, Flushable
         }
 
         $this->pending[$reason] = ($this->pending[$reason] ?? 0) + $count;
+
+        if (! $this->spoolEnabled) {
+            $this->ensureDefaultGitIgnore();
+        }
+
         $this->flush();
+    }
+
+    /**
+     * Once per instance. ensure() does not mkdir, so a host that has never
+     * created storage/watch stays untouched. A host that already has the
+     * directory (and old ndjson) gains a .gitignore.
+     */
+    private function ensureDefaultGitIgnore(): void
+    {
+        if ($this->defaultGitIgnoreEnsured || $this->gitignore === null) {
+            return;
+        }
+
+        $this->defaultGitIgnoreEnsured = true;
+
+        try {
+            $this->gitignore->afterWrite($this->spool->path(), false);
+        } catch (Throwable) {
+            // A missing gitignore must not affect the request.
+        }
     }
 }

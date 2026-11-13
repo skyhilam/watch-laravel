@@ -27,6 +27,14 @@ final class Reason
     public const QUOTA_EXCEEDED = 'quota_exceeded';
 
     /**
+     * Local counter only. Tests that leave the spool off record this in memory.
+     * It is not part of the protocol closed set: all() and drops() stay as they
+     * are, and FileDropLedger::clean drops anything outside that set, so central
+     * never receives it.
+     */
+    public const SPOOL_DISABLED_TESTING = 'spool_disabled_testing';
+
+    /**
      * The closed set from docs/protocol.md.
      *
      * @return list<string>

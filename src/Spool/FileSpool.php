@@ -24,6 +24,8 @@ final class FileSpool
     /** @var Closure(): int */
     private readonly Closure $clock;
 
+    private readonly ?GitIgnore $gitignore;
+
     public function __construct(
         private readonly string $path,
         private readonly int $maxBytes,
@@ -32,8 +34,10 @@ final class FileSpool
         private readonly SpoolWriter $writer,
         private readonly Recorder $recorder,
         ?Closure $clock = null,
+        ?GitIgnore $gitignore = null,
     ) {
         $this->clock = $clock ?? static fn (): int => time();
+        $this->gitignore = $gitignore;
     }
 
     public function path(): string
@@ -85,6 +89,7 @@ final class FileSpool
 
         $final = $this->path.'/'.$this->fileName($count);
         $tmp = $final.self::TMP_SUFFIX;
+        $existed = is_dir($this->path);
 
         try {
             $ok = $this->writer->write($tmp, $payload);
@@ -97,6 +102,14 @@ final class FileSpool
             $this->recorder->add(Reason::SPOOL_ENOSPC, $count);
 
             return Reason::SPOOL_ENOSPC;
+        }
+
+        if ($this->gitignore !== null) {
+            try {
+                $this->gitignore->afterWrite($this->path, ! $existed);
+            } catch (Throwable) {
+                // A gitignore failure must not change the spool result.
+            }
         }
 
         return null;

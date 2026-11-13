@@ -23,7 +23,10 @@ final class FileDropLedger implements DropLedger
 
     private const LOCK_RETRY_MICROSECONDS = 200;
 
-    public function __construct(private readonly string $directory) {}
+    public function __construct(
+        private readonly string $directory,
+        private readonly ?GitIgnore $gitignore = null,
+    ) {}
 
     public function path(): string
     {
@@ -68,8 +71,17 @@ final class FileDropLedger implements DropLedger
     private function update(Closure $change, bool $wait, bool $create): bool
     {
         try {
-            if ($create && ! is_dir($this->directory) && ! @mkdir($this->directory, 0770, true) && ! is_dir($this->directory)) {
-                return false;
+            $existed = is_dir($this->directory);
+            $createdNow = false;
+            if ($create && ! $existed) {
+                $createdNow = @mkdir($this->directory, 0770, true) === true;
+                if (! $createdNow && ! is_dir($this->directory)) {
+                    return false;
+                }
+            }
+
+            if ($create && is_dir($this->directory)) {
+                $this->noteGitIgnore($createdNow);
             }
 
             $handle = @fopen($this->path(), 'c+');
@@ -104,6 +116,22 @@ final class FileDropLedger implements DropLedger
         } finally {
             @flock($handle, LOCK_UN);
             @fclose($handle);
+        }
+    }
+
+    /**
+     * Gitignore bookkeeping must not change what add() or take() returns.
+     */
+    private function noteGitIgnore(bool $createdNow): void
+    {
+        if ($this->gitignore === null) {
+            return;
+        }
+
+        try {
+            $this->gitignore->afterWrite($this->directory, $createdNow);
+        } catch (Throwable) {
+            // Best effort.
         }
     }
 

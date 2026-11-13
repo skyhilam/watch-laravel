@@ -37,6 +37,9 @@ abstract class TestCase extends Orchestra
         mkdir($this->tempDir, 0770, true);
         $app['config']->set('watch.spool.path', $this->tempDir.'/spool');
         $app['config']->set('watch.transport.endpoint', 'unix://'.$this->tempDir.'/agent.sock');
+        // Package tests exercise the real spool. Host apps leave this off, so
+        // PHPUnit does not fill storage/watch/spool with untracked ndjson.
+        $app['config']->set('watch.spool.in_tests', true);
 
         if ($this->useInMemoryTransport) {
             $app->instance(Transport::class, new InMemoryTransport());

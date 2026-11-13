@@ -63,6 +63,7 @@ php artisan watch:install
 | `watch.agent.central_url` | `WATCH_CENTRAL_URL`（base URL）→ `WATCH_TOKEN` 入面嘅 url → `https://watch.skyhilam.com` |
 | `watch.transport.endpoint` | `WATCH_AGENT_ENDPOINT` → `WATCH_TOKEN` 入面嘅 endpoint → Unix socket `storage/watch/agent.sock` |
 | `watch.spool.path` | `WATCH_SPOOL_PATH` → `storage/watch/spool` |
+| `watch.spool.in_tests` | `WATCH_SPOOL_IN_TESTS` → false |
 
 已發佈嘅 `config/watch.php` 入面唔係 `null` 或空字串嘅值，同環境變數一樣優先。
 
@@ -83,11 +84,30 @@ WATCH_CAPTURE_QUERY=true
 
 仍然支援。格式係 `wt_` + base64url（冇 padding）嘅 `{"v":1,"url":"https://watch.example.com","key":"<project key>"}`，可以有 `endpoint`。`url` 冇尾 `/`，`v` 一定係 `1`。
 
+## Spool 位置同 git
+
+預設 spool 喺 `storage/watch/spool`，agent socket 喺 `storage/watch/agent.sock`。
+
+第一次寫入時，如果未有 `.gitignore`，套件會喺 `storage/watch` 同 spool 目錄各寫一個，內容同 Laravel `storage/logs/.gitignore` 一樣：
+
+```gitignore
+*
+!.gitignore
+```
+
+已有 `.gitignore`（包括 symlink）絕不覆寫。`WATCH_SPOOL_PATH` 指向自訂目錄時，只會喺套件自己建立該目錄嗰次先寫；你原本已有、而且未有 `.gitignore` 嘅目錄唔會被放一個忽略所有檔嘅 `*`。寫入失敗唔影響 request。
+
+測試環境（`runningUnitTests()` 或者 `APP_ENV=testing`）預設唔寫 spool，事件直接 drop，只喺記憶體計 `spool_disabled_testing`。要喺測試寫 spool，設 `WATCH_SPOOL_IN_TESTS=true`。如果 `storage/watch` 已經存在但未有 `.gitignore`，第一次呢類 drop 會補寫一個（唔會新建目錄），之前積落嘅 ndjson 會即刻被 git 忽略。
+
+`watch.enabled` 係另一個總開關，用來停 capture。佢同 `watch.spool.in_tests` 唔同：`in_tests` 只決定測試時寫唔寫 spool。
+
+升級前已經積落嘅 `storage/watch/spool/*.ndjson` 可以直接刪。之前人手加喺 `.git/info/exclude` 嘅規則可以移除。
+
 ## Fail-open
 
 - 冇設定 `WATCH_PROJECT_KEY`（亦冇 `WATCH_TOKEN`）：app 照常起，唔記 warning；`watch:agent` 會拒絕啟動。
 - `WATCH_TOKEN` 格式錯：略過個 token，app 照常起。每個 process 只記一次 warning，warning 唔包含 token 或 key。
-- 連唔到 agent 或者寫入超時：事件改寫入本機 spool，之後由 agent 補送。
+- 連唔到 agent 或者寫入超時：事件改寫入本機 spool，之後由 agent 補送。測試環境預設唔寫 spool，見「Spool 位置同 git」。
 - Spool 滿、寫唔到、或者過期：事件會 drop，並按原因計數報上 central。唔會靜默當成已錄。
 - 以上任何情況，業務 HTTP response 都唔會變，亦唔會因為套件而出 5xx。
 

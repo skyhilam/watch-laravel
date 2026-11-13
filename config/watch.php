@@ -178,10 +178,22 @@ return [
     | 上面三個上限），等 agent 報上中央。PHP-FPM 每個 request 完結就冇晒記憶體
     | 狀態，所以計數唔可以只放喺記憶體。寫 ledger 係盡力而為，唔係保證。
     |
+    | runningUnitTests() 或者 APP_ENV=testing 時，預設唔寫 spool。事件直接
+    | drop，只喺呢個 process 嘅記憶體計 spool_disabled_testing（唔入 protocol
+    | 嘅封閉集合，亦唔寫 drops.ledger）。要喺測試寫 spool，設
+    | WATCH_SPOOL_IN_TESTS=true（watch.spool.in_tests）。舊版已 publish 嘅
+    | config 冇呢個 key，會係 null，等同 false。
+    |
+    | 第一次寫入預設 storage/watch（同埋 spool 目錄）時，如果未有 .gitignore，
+    | 會寫入 * 同 !.gitignore，同 Laravel storage/logs 一樣。已有檔（包括
+    | symlink）絕不覆寫。WATCH_SPOOL_PATH 自訂目錄只會喺套件自己建立該目錄時
+    | 先寫，避免喺你原本嘅目錄放一個忽略所有檔嘅 *。寫唔到就略過，唔影響 request。
+    |
     */
 
     'spool' => [
         'path' => env('WATCH_SPOOL_PATH'),
+        'in_tests' => filter_var(env('WATCH_SPOOL_IN_TESTS', false), FILTER_VALIDATE_BOOLEAN),
         'max_bytes' => 50 * 1024 * 1024,
         'max_files' => 1000,
         'max_age_seconds' => 86400,

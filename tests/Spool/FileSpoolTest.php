@@ -167,6 +167,14 @@ final class FileSpoolTest extends TestCase
         $this->assertSame(0, $spool->expire());
     }
 
+    public function test_write_without_a_gitignore_helper_does_not_create_one(): void
+    {
+        $spool = $this->spool();
+
+        $this->assertNull($spool->write($this->events(1)));
+        $this->assertFileDoesNotExist($this->dir.'/.gitignore');
+    }
+
     public function test_ndjson_round_trip_skips_invalid_lines(): void
     {
         $encoded = Ndjson::encode([['a' => 1], ['b' => "line\nbreak"], ['c' => 'ü/'], ['d' => NAN]]);

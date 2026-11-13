@@ -32,6 +32,7 @@ use Watch\Laravel\Spool\DropLedger;
 use Watch\Laravel\Spool\FileDropLedger;
 use Watch\Laravel\Spool\FileSpool;
 use Watch\Laravel\Spool\FilesystemSpoolWriter;
+use Watch\Laravel\Spool\GitIgnore;
 use Watch\Laravel\Spool\SpoolWriter;
 use Watch\Laravel\Support\WatchToken;
 use Watch\Laravel\Transport\AgentTransport;
@@ -67,7 +68,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->bindIf(SpoolWriter::class, FilesystemSpoolWriter::class, true);
         $this->app->bindIf(CentralClient::class, StreamCentralClient::class, true);
         $this->app->bindIf(FileSpool::class, fn (Container $app): FileSpool => $this->makeSpool($app), true);
-        $this->app->bindIf(DropLedger::class, static fn (): DropLedger => new FileDropLedger(self::spoolPath()), true);
+        $this->app->bindIf(DropLedger::class, static fn (): DropLedger => new FileDropLedger(self::spoolPath(), self::gitIgnore()), true);
         // Not shared: the endpoint is read (and a non-loopback host refused) on every send.
         $this->app->bindIf(AgentSocket::class, fn (): AgentSocket => $this->makeSocketClient(), false);
         $this->app->bindIf(Transport::class, static fn (Container $app): Transport => new AgentTransport(
@@ -75,6 +76,8 @@ class WatchServiceProvider extends ServiceProvider
             $app->make(FileSpool::class),
             $app->make(DropLedger::class),
             $app->make(Recorder::class),
+            ! self::runningTests($app) || filter_var(config('watch.spool.in_tests'), FILTER_VALIDATE_BOOLEAN),
+            self::gitIgnore(),
         ), true);
     }
 
@@ -113,6 +116,47 @@ class WatchServiceProvider extends ServiceProvider
         return $path === '' ? '/' : $path;
     }
 
+    /**
+     * .gitignore helper for the package default tree.
+     *
+     * alwaysDirs is storage/watch and the spool directory when the spool lives
+     * under that tree. A custom spool path gets an empty list: GitIgnore then
+     * writes only if this package itself created that directory.
+     */
+    public static function gitIgnore(): GitIgnore
+    {
+        try {
+            $root = storage_path('watch');
+            $spool = self::spoolPath();
+        } catch (Throwable) {
+            return new GitIgnore([]);
+        }
+
+        $always = ($spool === $root || str_starts_with($spool, $root.'/'))
+            ? array_values(array_unique([$root, $spool]))
+            : [];
+
+        return new GitIgnore($always);
+    }
+
+    /**
+     * PHPUnit via runningUnitTests(), or any process whose environment is
+     * "testing" (APP_ENV). A failure here means "not tests", so the spool stays
+     * on: that is the behaviour outside the test suite.
+     */
+    private static function runningTests(Container $app): bool
+    {
+        try {
+            if (method_exists($app, 'runningUnitTests') && $app->runningUnitTests()) {
+                return true;
+            }
+
+            return $app->environment('testing');
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
     private function makeSpool(Container $app): FileSpool
     {
         $config = (array) config('watch.spool', []);
@@ -124,6 +168,8 @@ class WatchServiceProvider extends ServiceProvider
             max(1, $this->int($config['max_age_seconds'] ?? null, 86400)),
             $app->make(SpoolWriter::class),
             $app->make(Recorder::class),
+            null,
+            self::gitIgnore(),
         );
     }
 
