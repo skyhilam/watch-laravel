@@ -34,6 +34,62 @@ class Limits
         return $value;
     }
 
+    /**
+     * Bound one log message before it is copied into the spool.
+     * PHP 7.3 syntax: no union types, named args, match, or nullsafe.
+     *
+     * @param mixed $value
+     */
+    public static function message($value, int $limit = 8192): string
+    {
+        if (! is_string($value)) {
+            return '';
+        }
+
+        if ($limit < 0) {
+            $limit = 0;
+        }
+
+        $marker = "…[truncated]";
+        $clean = str_replace("\0", "\xEF\xBF\xBD", $value);
+
+        if (function_exists('mb_scrub')) {
+            $clean = mb_scrub($clean, 'UTF-8');
+        } else {
+            $converted = mb_convert_encoding($clean, 'UTF-8', 'UTF-8');
+            $clean = is_string($converted) ? $converted : '';
+        }
+
+        if (strpos($clean, "\0") !== false) {
+            $clean = str_replace("\0", '', $clean);
+        }
+
+        if (preg_match('//u', $clean) !== 1) {
+            $clean = '';
+        }
+
+        if (strlen($clean) > $limit) {
+            $keep = $limit - strlen($marker);
+            if ($keep < 1) {
+                $cut = mb_strcut($marker, 0, $limit, 'UTF-8');
+                $clean = is_string($cut) ? $cut : '';
+            } else {
+                $cut = mb_strcut($clean, 0, $keep, 'UTF-8');
+                $clean = (is_string($cut) ? $cut : '').$marker;
+            }
+        }
+
+        if (strlen($clean) > $limit || preg_match('//u', $clean) !== 1 || strpos($clean, "\0") !== false) {
+            $cut = mb_strcut($clean, 0, $limit, 'UTF-8');
+            $clean = is_string($cut) ? $cut : '';
+            if (preg_match('//u', $clean) !== 1 || strpos($clean, "\0") !== false) {
+                return '';
+            }
+        }
+
+        return $clean;
+    }
+
     /** Redact while walking, before encoding, transport or spool. Never visit an unbounded tree. */
     public function capture($value, Redactor $redactor, int $maxBytes): array
     {

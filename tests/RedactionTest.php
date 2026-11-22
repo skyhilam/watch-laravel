@@ -161,4 +161,15 @@ final class RedactionTest extends TestCase
         }
     }
 
+    public function test_objects_are_not_passed_through_with_their_properties(): void
+    {
+        $redacted = $this->app->make(Redactor::class)->redact([
+            'o' => (object) ['password' => 'x'],
+        ]);
+
+        $encoded = json_encode($redacted, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('x', $encoded);
+        $this->assertSame('[object]', $redacted['o']);
+    }
+
 }

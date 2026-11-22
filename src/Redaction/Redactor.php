@@ -127,7 +127,25 @@ final class Redactor
                 continue;
             }
 
-            $redacted[$key] = is_array($item) ? $this->redactArray($item, $sensitive) : $item;
+            if (is_array($item)) {
+                $redacted[$key] = $this->redactArray($item, $sensitive);
+
+                continue;
+            }
+
+            if (is_object($item)) {
+                $redacted[$key] = '[object]';
+
+                continue;
+            }
+
+            if (is_resource($item) || gettype($item) === 'resource (closed)') {
+                $redacted[$key] = '[resource]';
+
+                continue;
+            }
+
+            $redacted[$key] = $item;
         }
 
         return $redacted;

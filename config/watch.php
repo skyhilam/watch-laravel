@@ -100,7 +100,7 @@ return [
         'max_depth' => 6, // 容器層數；超限位置改成 [truncated]。
         'max_array_items' => 50, // 每個 array/map 項數，包含截斷標記。
         'max_string_bytes' => 2048, // 每個字串；唔會切斷 UTF-8。
-        'max_payload_bytes' => 16384, // 遮罩後 payload／query 各自 JSON 上限。
+        'max_payload_bytes' => 16384, // 遮罩後 payload／query 各自 JSON 上限。亦適用於每筆 log context。
         'max_header_bytes' => 1024, // 每個 header 合併後嘅值。
         'max_envelope_bytes' => 65536, // 編碼後 request；依次丟 payload/query/headers。
     ],

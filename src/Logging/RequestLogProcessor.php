@@ -6,6 +6,7 @@ namespace Watch\Laravel\Logging;
 
 use Illuminate\Contracts\Container\Container;
 use Throwable;
+use Watch\Laravel\Capture\Limits;
 use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Context\RequestContext;
@@ -25,6 +26,7 @@ final class RequestLogProcessor
         private readonly Container $container,
         private readonly Redactor $redactor,
         private readonly Recorder $recorder,
+        private readonly \Watch\Laravel\Capture\Limits $limits,
     ) {}
 
     /**
@@ -126,14 +128,16 @@ final class RequestLogProcessor
             return $extra;
         }
 
-        $redacted = $this->redactor->redact($context);
-        if (! is_array($redacted)) {
-            $redacted = [];
-        }
+        $captured = $this->limits->capture(
+            $context,
+            $this->redactor,
+            Limits::positive(config('watch.capture.max_payload_bytes', 16384), 16384),
+        );
+        $redacted = isset($captured['value']) && is_array($captured['value']) ? $captured['value'] : [];
 
         $request->pushLog([
             'level' => $levelName,
-            'message' => $message,
+            'message' => Limits::message($message, 8192),
             'context' => $redacted,
             'logged_at' => \DateTimeImmutable::createFromInterface($datetime)
                 ->setTimezone(new \DateTimeZone('UTC'))
