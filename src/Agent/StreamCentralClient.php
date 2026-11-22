@@ -12,8 +12,14 @@ use Watch\Laravel\Contracts\CentralClient;
  */
 final class StreamCentralClient implements CentralClient
 {
+    private const MAX_RESPONSE_BYTES = 65536;
+
     public function post(string $url, string $projectKey, array $events, int $timeoutMs): CentralResponse
     {
+        if (strpbrk($projectKey, "\r\n\0") !== false) {
+            return CentralResponse::unreachable('project key contains control characters');
+        }
+
         $body = json_encode(['events' => $events], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
         if (! is_string($body)) {
             return new CentralResponse(400, '', 'batch could not be encoded');
@@ -73,14 +79,14 @@ final class StreamCentralClient implements CentralClient
     {
         // PHP 8.4 added the function; the magic local variable is the only way before that.
         if (function_exists('http_get_last_response_headers')) {
-            $response = @file_get_contents($url, false, $context);
+            $response = @file_get_contents($url, false, $context, 0, self::MAX_RESPONSE_BYTES);
             $headers = $response === false ? [] : (http_get_last_response_headers() ?? []);
 
             return [$response, array_values($headers)];
         }
 
         $http_response_header = [];
-        $response = @file_get_contents($url, false, $context);
+        $response = @file_get_contents($url, false, $context, 0, self::MAX_RESPONSE_BYTES);
 
         return [$response, array_values($http_response_header)];
     }

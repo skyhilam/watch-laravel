@@ -339,7 +339,7 @@ class WatchServiceProvider extends ServiceProvider
      * scripts/e2e.sh sets WATCH_E2E_FIXTURE. Testbench 6's `serve` does not
      * forward TESTBENCH_WORKING_PATH, so workbench/routes/web.php is not
      * discovered and GET /watch-e2e is a 404. Register the same fixture when
-     * that route is still missing. Host apps leave the variable unset.
+     * that route is still missing and the application is outside production.
      * Keep the closure in sync with workbench/routes/web.php.
      */
     private function registerE2eFixtureRoute(): void
@@ -366,6 +366,14 @@ class WatchServiceProvider extends ServiceProvider
 
     private function e2eFixtureEnabled(): bool
     {
+        try {
+            if ($this->app->environment('production') || $this->app->make('config')->get('app.env') === 'production') {
+                return false;
+            }
+        } catch (Throwable) {
+            return false;
+        }
+
         $value = $_ENV['WATCH_E2E_FIXTURE'] ?? $_SERVER['WATCH_E2E_FIXTURE'] ?? false;
         if ($value === false) {
             $fromEnv = getenv('WATCH_E2E_FIXTURE');

@@ -51,8 +51,16 @@ final class AgentCommand extends Command
         }
 
         $projectKey = config('watch.agent.project_key');
-        if (! is_string($projectKey) || trim($projectKey) === '') {
+        // Keep CR, LF and NUL visible to validation, including at either end.
+        $projectKey = is_string($projectKey) ? trim($projectKey, " \t\v") : '';
+        if ($projectKey === '') {
             $this->error('watch:agent refused to start: watch.agent.project_key is not set.');
+
+            return self::FAILURE;
+        }
+
+        if (strpbrk($projectKey, "\r\n\0") !== false) {
+            $this->error('watch:agent refused to start: watch.agent.project_key contains control characters.');
 
             return self::FAILURE;
         }
@@ -70,7 +78,7 @@ final class AgentCommand extends Command
             $spool,
             $client,
             $centralUrl,
-            trim($projectKey),
+            $projectKey,
             max(1, $this->int(config('watch.agent.batch_size'), 100)),
             max(1, $this->int(config('watch.agent.request_timeout_ms'), 5000)),
             new Backoff(max(1, $this->int($retry['base_ms'] ?? 500, 500)), max(1, $this->int($retry['max_ms'] ?? 30000, 30000))),
@@ -86,7 +94,7 @@ final class AgentCommand extends Command
             $drainer,
             $status,
             $runtime,
-            trim($projectKey),
+            $projectKey,
             max(1, $this->int(config('watch.agent.status_interval_seconds'), 30)),
             200,
             null,

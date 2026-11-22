@@ -19,6 +19,12 @@ if (is_string($record) && $record !== '') {
 
 $path = parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
 
+if ($path === '/huge') {
+    echo str_repeat('x', 200_000);
+
+    return true;
+}
+
 if ($path === '/busy') {
     http_response_code(503);
     echo 'maintenance';

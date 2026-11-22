@@ -111,6 +111,20 @@ final class AgentCommandTest extends TestCase
         $this->assertStringContainsString('central_url is not set', $output);
     }
 
+    public function test_refuses_project_key_control_characters_before_startup(): void
+    {
+        $client = $this->central();
+        foreach (["abc\r\nX-Evil: 1", "ab\0c", "abc\r", "\nabc"] as $key) {
+            config()->set('watch.agent.project_key', $key);
+
+            [$exit, $output] = $this->runCommand('watch:agent', ['--once' => true]);
+
+            $this->assertSame(1, $exit);
+            $this->assertSame('watch:agent refused to start: watch.agent.project_key contains control characters.', trim($output));
+        }
+        $this->assertSame([], $client->posts);
+    }
+
     public function test_loopback_plain_http_central_is_allowed(): void
     {
         config()->set('watch.agent.central_url', 'http://127.0.0.1:8000/api/v1/ingest');

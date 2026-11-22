@@ -115,6 +115,27 @@ final class StreamCentralClientTest extends TestCase
         $this->assertSame(['events' => $events], json_decode($received[0]['body'], true));
     }
 
+    public function test_response_body_is_limited_to_65536_bytes(): void
+    {
+        $response = (new StreamCentralClient())->post(self::$base.'/huge', 'k', [], 5000);
+
+        $this->assertSame(200, $response->status);
+        $this->assertSame(65536, strlen($response->body));
+    }
+
+    public function test_project_key_control_characters_prevent_sending(): void
+    {
+        $client = new StreamCentralClient();
+        foreach (["ab\rc", "ab\nc", "ab\0c"] as $key) {
+            $response = $client->post(self::$base.'/api/v1/ingest', $key, [], 5000);
+
+            $this->assertSame(0, $response->status);
+            $this->assertSame('project key contains control characters', $response->error);
+            $this->assertTrue($response->retryable());
+        }
+        $this->assertSame([], $this->received());
+    }
+
     public function test_error_statuses_come_back_as_statuses_not_exceptions(): void
     {
         $client = new StreamCentralClient();

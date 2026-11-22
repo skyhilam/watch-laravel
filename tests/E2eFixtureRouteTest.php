@@ -14,9 +14,13 @@ final class E2eFixtureRouteTest extends TestCase
 {
     private bool $fixtureEnabled = false;
 
+    private string $fixtureEnvironment = 'testing';
+
     protected function getEnvironmentSetUp($app): void
     {
         parent::getEnvironmentSetUp($app);
+        $app['env'] = $this->fixtureEnvironment;
+        $app['config']->set('app.env', $this->fixtureEnvironment);
         // web middleware encrypts cookies. The e2e skeleton .env has this key.
         $app['config']->set('app.key', 'AckfSECXIvnK5r28GVIWUAxmbBSjTsmF');
 
@@ -58,5 +62,24 @@ final class E2eFixtureRouteTest extends TestCase
         $response->assertOk();
         $this->assertSame('watch-e2e-ok', $response->getContent());
         $this->assertTrue($this->app->make('router')->has('watch.e2e.ping'));
+    }
+
+    public function test_enabled_fixture_is_unavailable_in_production(): void
+    {
+        $this->fixtureEnvironment = 'production';
+        $this->fixtureEnabled = true;
+        $this->refreshApplication();
+
+        $this->assertFalse($this->app->make('router')->has('watch.e2e.ping'));
+        $this->get('/watch-e2e')->assertNotFound();
+    }
+
+    public function test_enabled_fixture_is_available_locally(): void
+    {
+        $this->fixtureEnvironment = 'local';
+        $this->fixtureEnabled = true;
+        $this->refreshApplication();
+
+        $this->get('/watch-e2e')->assertOk();
     }
 }

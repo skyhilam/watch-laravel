@@ -18,6 +18,8 @@ final class Listener
 
     private int $oversized = 0;
 
+    private int $timedOut = 0;
+
     public function __construct(
         private readonly Endpoint $endpoint,
         private readonly int $maxPayloadBytes = 8 * 1024 * 1024,
@@ -74,6 +76,11 @@ final class Listener
     public function oversized(): int
     {
         return $this->oversized;
+    }
+
+    public function timedOut(): int
+    {
+        return $this->timedOut;
     }
 
     /**
@@ -165,40 +172,43 @@ final class Listener
      */
     private function drain($client): ?string
     {
-        stream_set_blocking($client, true);
-        stream_set_timeout($client, intdiv($this->readTimeoutMs, 1000), ($this->readTimeoutMs % 1000) * 1000);
-
+        $deadline = hrtime(true) + $this->readTimeoutMs * 1_000_000;
         $buffer = '';
-        $overflow = false;
 
         try {
-            while (! feof($client)) {
-                $chunk = @fread($client, 65536);
-                if ($chunk === false || $chunk === '') {
-                    $meta = stream_get_meta_data($client);
-                    if (($meta['timed_out'] ?? false) === true || $chunk === false) {
-                        break;
-                    }
+            stream_set_blocking($client, true);
+            while (true) {
+                $remainingNs = $deadline - hrtime(true);
+                if ($remainingNs <= 0) {
+                    break;
+                }
+                $remainingUs = max(1, (int) ($remainingNs / 1000));
+                stream_set_timeout($client, intdiv($remainingUs, 1_000_000), $remainingUs % 1_000_000);
 
-                    continue;
+                $chunk = @fread($client, 65536);
+                if (stream_get_meta_data($client)['timed_out']) {
+                    break;
+                }
+                if ($chunk === false) {
+                    return null;
                 }
 
                 $buffer .= $chunk;
                 if (strlen($buffer) > $this->maxPayloadBytes) {
-                    $overflow = true;
-                    break;
+                    $this->oversized++;
+
+                    return null;
+                }
+                if (feof($client)) {
+                    return $buffer === '' ? null : $buffer;
                 }
             }
+
+            $this->timedOut++;
+
+            return null;
         } finally {
             @fclose($client);
         }
-
-        if ($overflow) {
-            $this->oversized++;
-
-            return null;
-        }
-
-        return $buffer === '' ? null : $buffer;
     }
 }
