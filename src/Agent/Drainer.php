@@ -11,10 +11,27 @@ use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Contracts\CentralClient;
 use Watch\Laravel\Spool\FileSpool;
+use Watch\Laravel\Spool\SpoolFile;
 
 /**
- * Moves spooled batches to central. Files are only deleted after a 2xx, so a
- * retry re-sends the same events with the same ingest_id and central dedupes.
+ * Moves spooled batches to central.
+ *
+ * A file is deleted, or replaced by the events that were not in the batch,
+ * only after central accepts the batch (2xx) or permanently rejects it
+ * (400, 413, 422). A retry leaves that file untouched, so the same prefix is
+ * sent again with the same ingest_id and central dedupes it.
+ *
+ * One spool file may hold more events than one batch, or more bytes than one
+ * request can carry. The longest prefix that fits is sent and the remainder
+ * is written back with the original ingest_ids. An event that cannot be
+ * encoded, or that is larger than max_batch_bytes on its own, is dropped and
+ * counted as transport_error only when that file is actually deleted or
+ * replaced. A retry does not count it.
+ *
+ * If the remainder cannot be written back, the original file stays in place
+ * and nothing extra is counted. The next attempt sends the same prefix again
+ * and central dedupes it. At worst the original file reaches max_age_seconds
+ * and expire() counts it as spool_expired.
  *
  * Status events go through send() as their own request: a batch central
  * rejects must never take spooled events down with it, or the other way round.
@@ -101,70 +118,105 @@ final class Drainer
 
         $this->spool->expire();
 
-        $files = [];
-        $events = [];
+        $batch = [];
+        /** @var list<array{file: SpoolFile, partial: bool, remainder: list<array<string, mixed>>, oversized: int, posted: int}> $plans */
+        $plans = [];
+        $droppedFiles = 0;
+
         foreach ($this->spool->files() as $file) {
-            if ($files !== [] && count($events) + $file->events > $this->batchSize) {
+            $classified = $this->classify($this->spool->read($file));
+
+            if ($classified['sendable'] === []) {
+                if ($this->consume($file)) {
+                    $droppedFiles++;
+                    $this->countOversized($classified['oversized']);
+                }
+
+                continue;
+            }
+
+            if ($batch === []) {
+                $prefix = $this->fittingPrefix($classified['sendable']);
+                if ($prefix === []) {
+                    break;
+                }
+
+                $posted = count($prefix);
+                $partial = $posted < count($classified['sendable']);
+                $plans[] = [
+                    'file' => $file,
+                    'partial' => $partial,
+                    'remainder' => $partial ? array_slice($classified['sendable'], $posted) : [],
+                    'oversized' => $classified['oversized'],
+                    'posted' => $posted,
+                ];
+                $batch = $prefix;
+
+                if ($partial || count($batch) >= $this->batchSize) {
+                    break;
+                }
+
+                continue;
+            }
+
+            if (count($batch) + count($classified['sendable']) > $this->batchSize) {
                 break;
             }
 
-            // Do not load an obviously oversized file into memory. Account for
-            // the JSON wrapper too in the exact check after decoding below.
-            if ($file->bytes > $this->maxBatchBytes) {
-                $this->spool->delete($file);
-                $this->recorder->add(Reason::TRANSPORT_ERROR, $file->events);
-                continue;
-            }
-            $incoming = $this->spool->read($file);
-            $single = $this->encodedBytes($incoming);
-            if ($single === null || $single > $this->maxBatchBytes) {
-                $this->spool->delete($file);
-                $this->recorder->add(Reason::TRANSPORT_ERROR, max(1, count($incoming)));
-                continue;
-            }
-            $combined = array_merge($events, $incoming);
+            $combined = array_merge($batch, $classified['sendable']);
             $bytes = $this->encodedBytes($combined);
-            if ($files !== [] && ($bytes === null || $bytes > $this->maxBatchBytes)) {
+            if ($bytes === null || $bytes > $this->maxBatchBytes) {
                 break;
             }
-            $files[] = $file;
-            $events = $combined;
 
-            if (count($events) >= $this->batchSize) {
+            $plans[] = [
+                'file' => $file,
+                'partial' => false,
+                'remainder' => [],
+                'oversized' => $classified['oversized'],
+                'posted' => count($classified['sendable']),
+            ];
+            $batch = $combined;
+
+            if (count($batch) >= $this->batchSize) {
                 break;
             }
         }
 
-        if ($files === []) {
-            return $this->result(self::IDLE, 0, 0, null);
+        if ($batch === []) {
+            return $this->result(self::IDLE, 0, $droppedFiles, null);
         }
 
-        if ($events === []) {
-            // Nothing readable in these files; read() already counted the lines.
-            foreach ($files as $file) {
-                $this->spool->delete($file);
-            }
-
-            return $this->result(self::IDLE, 0, count($files), null);
-        }
-
-        $outcome = $this->post($events);
+        $outcome = $this->post($batch);
 
         if ($outcome === self::RETRY) {
-            return $this->result($outcome, 0, 0, $this->lastResponse?->status);
+            return $this->result($outcome, 0, $droppedFiles, $this->lastResponse?->status);
         }
 
-        foreach ($files as $file) {
-            $this->spool->delete($file);
+        $committed = $droppedFiles;
+        $rejected = 0;
+
+        foreach ($plans as $plan) {
+            if (! $this->commitPlan($plan)) {
+                continue;
+            }
+
+            $committed++;
+            $this->countOversized($plan['oversized']);
+            if ($outcome === self::REJECTED) {
+                $rejected += $plan['posted'];
+            }
+        }
+
+        if ($rejected > 0) {
+            $this->recorder->add(Reason::TRANSPORT_ERROR, $rejected);
         }
 
         if ($outcome === self::REJECTED) {
-            $this->recorder->add(Reason::TRANSPORT_ERROR, count($events));
-
-            return $this->result($outcome, 0, count($files), $this->lastResponse?->status);
+            return $this->result($outcome, 0, $committed, $this->lastResponse?->status);
         }
 
-        return $this->result($outcome, count($events), count($files), $this->lastResponse?->status);
+        return $this->result($outcome, count($batch), $committed, $this->lastResponse?->status);
     }
 
     /**
@@ -221,6 +273,87 @@ final class Drainer
         return self::SENT;
     }
 
+    /**
+     * @param list<array<string, mixed>> $events
+     * @return array{sendable: list<array<string, mixed>>, oversized: int}
+     */
+    private function classify(array $events): array
+    {
+        $sendable = [];
+        $oversized = 0;
+
+        foreach ($events as $event) {
+            $bytes = $this->encodedBytes([$event]);
+            if ($bytes === null || $bytes > $this->maxBatchBytes) {
+                $oversized++;
+
+                continue;
+            }
+
+            $sendable[] = $event;
+        }
+
+        return ['sendable' => $sendable, 'oversized' => $oversized];
+    }
+
+    /**
+     * Longest prefix that stays within the batch count and the encoded byte cap.
+     *
+     * @param list<array<string, mixed>> $events
+     * @return list<array<string, mixed>>
+     */
+    private function fittingPrefix(array $events): array
+    {
+        $prefix = [];
+
+        foreach ($events as $event) {
+            if (count($prefix) >= $this->batchSize) {
+                break;
+            }
+
+            $candidate = $prefix;
+            $candidate[] = $event;
+            $bytes = $this->encodedBytes($candidate);
+            if ($bytes === null || $bytes > $this->maxBatchBytes) {
+                break;
+            }
+
+            $prefix = $candidate;
+        }
+
+        return $prefix;
+    }
+
+    /**
+     * @param array{file: SpoolFile, partial: bool, remainder: list<array<string, mixed>>, oversized: int, posted: int} $plan
+     */
+    private function commitPlan(array $plan): bool
+    {
+        if ($plan['partial']) {
+            return $this->spool->replace($plan['file'], $plan['remainder']);
+        }
+
+        return $this->consume($plan['file']);
+    }
+
+    private function consume(SpoolFile $file): bool
+    {
+        $this->spool->delete($file);
+        clearstatcache(true, $file->path);
+
+        return ! is_file($file->path);
+    }
+
+    private function countOversized(int $count): void
+    {
+        if ($count > 0) {
+            $this->recorder->add(Reason::TRANSPORT_ERROR, $count);
+        }
+    }
+
+    /**
+     * @param list<array<string, mixed>> $events
+     */
     private function encodedBytes(array $events): ?int
     {
         $body = json_encode(['events' => $events], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);

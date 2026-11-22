@@ -16,6 +16,7 @@ use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Contracts\CentralClient;
 use Watch\Laravel\Spool\FileSpool;
 use Watch\Laravel\Spool\FilesystemSpoolWriter;
+use Watch\Laravel\Tests\Support\FailingSpoolWriter;
 use Watch\Laravel\Tests\Support\FakeCentralClient;
 use Watch\Laravel\Tests\Support\FakeDropLedger;
 
@@ -77,6 +78,16 @@ final class DrainerTest extends TestCase
         }
 
         return $events;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $events
+     */
+    private function encodedLength(array $events): int
+    {
+        $body = json_encode(['events' => $events], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+
+        return is_string($body) ? strlen($body) : 0;
     }
 
     public function test_unreachable_central_keeps_the_spool_and_schedules_backoff(): void
@@ -330,7 +341,7 @@ final class DrainerTest extends TestCase
         $this->assertSame([], $this->spool->files());
     }
 
-    public function test_oversized_file_is_dropped_and_does_not_block_the_next_file(): void
+    public function test_only_the_oversized_event_is_dropped_and_the_next_file_is_still_sent(): void
     {
         $big = $this->events(2, 'oversized');
         $big[0]['payload'] = ['body' => str_repeat('x', 2000)];
@@ -338,10 +349,229 @@ final class DrainerTest extends TestCase
         $this->spool->write($this->events(1, 'small'));
         $client = new FakeCentralClient();
         $result = $this->drainer($client, 100, 500)->drainOnce();
-        $this->assertSame(1, $result['sent']);
-        $this->assertSame(2, $this->recorder->count(Reason::TRANSPORT_ERROR));
-        $this->assertSame(['small-0'], array_column($client->eventsOfPost(0), 'ingest_id'));
+
+        $this->assertSame(2, $result['sent']);
+        $this->assertSame(1, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame(['oversized-1', 'small-0'], array_column($client->eventsOfPost(0), 'ingest_id'));
         $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_one_spool_file_over_batch_size_is_split_without_losing_events(): void
+    {
+        foreach ([150, 202] as $count) {
+            $original = $this->events($count, 'bulk'.$count);
+            $expected = array_column($original, 'ingest_id');
+            $this->spool->write($original);
+            $path = $this->spool->files()[0]->path;
+            touch($path, 1_700_000_000);
+            clearstatcache(true, $path);
+            $mtime = $this->spool->files()[0]->modifiedAt;
+            $this->assertSame(1_700_000_000, $mtime);
+
+            $client = new FakeCentralClient();
+            $drainer = $this->drainer($client, 100);
+            $seen = [];
+            $guard = 0;
+
+            do {
+                $before = count($client->posts);
+                $result = $drainer->drainOnce();
+                if (count($client->posts) > $before) {
+                    $batch = $client->eventsOfPost(count($client->posts) - 1);
+                    $this->assertLessThanOrEqual(100, count($batch));
+                    $this->assertNotSame([], $batch);
+                    foreach ($batch as $event) {
+                        $seen[] = $event['ingest_id'];
+                    }
+                }
+
+                if ($guard === 0) {
+                    $this->assertSame(Drainer::SENT, $result['outcome']);
+                    $this->assertSame(1, $result['files']);
+                    $left = $this->spool->files();
+                    $this->assertCount(1, $left);
+                    $this->assertSame($count - 100, $left[0]->events);
+                    $this->assertSame($mtime, $left[0]->modifiedAt);
+                    $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+                }
+
+                $guard++;
+            } while ($result['outcome'] !== Drainer::IDLE && $guard < 8);
+
+            $this->assertSame($expected, $seen);
+            $this->assertSame($expected, array_values(array_unique($seen)));
+            $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+            $this->assertSame([], $this->spool->files());
+            $this->assertLessThan(8, $guard);
+        }
+    }
+
+    public function test_retry_of_an_oversized_file_resends_the_same_prefix(): void
+    {
+        $this->spool->write($this->events(150, 'retry'));
+        $before = $this->spool->files()[0];
+        $contents = file_get_contents($before->path);
+        $client = new FakeCentralClient(
+            new CentralResponse(503, 'maintenance'),
+            new CentralResponse(200, '{"accepted":100}'),
+        );
+        $drainer = $this->drainer($client, 100);
+
+        $first = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::RETRY, $first['outcome']);
+        $this->assertSame(0, $first['files']);
+        $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertCount(1, $this->spool->files());
+        $this->assertSame($before->name(), $this->spool->files()[0]->name());
+        $this->assertSame($contents, file_get_contents($before->path));
+
+        $this->now += 10;
+        $second = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::SENT, $second['outcome']);
+        $this->assertSame(
+            array_column($client->eventsOfPost(0), 'ingest_id'),
+            array_column($client->eventsOfPost(1), 'ingest_id'),
+        );
+        $this->assertCount(100, $client->eventsOfPost(0));
+        $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+    }
+
+    public function test_rejected_prefix_counts_only_that_batch_and_sends_the_remainder(): void
+    {
+        $this->spool->write($this->events(150, 'rej'));
+        $client = new FakeCentralClient(
+            new CentralResponse(400, 'nope'),
+            new CentralResponse(200, '{"accepted":50}'),
+        );
+        $drainer = $this->drainer($client, 100);
+
+        $first = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::REJECTED, $first['outcome']);
+        $this->assertSame(0, $first['sent']);
+        $this->assertSame(100, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertCount(1, $this->spool->files());
+        $this->assertSame(50, $this->spool->files()[0]->events);
+        $remaining = array_column($this->spool->read($this->spool->files()[0]), 'ingest_id');
+        $this->assertSame(array_map(static fn (int $i): string => 'rej-'.$i, range(100, 149)), $remaining);
+
+        $second = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::SENT, $second['outcome']);
+        $this->assertSame(50, $second['sent']);
+        $this->assertSame($remaining, array_column($client->eventsOfPost(1), 'ingest_id'));
+        $this->assertSame(100, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_a_file_over_max_batch_bytes_is_split_without_dropping_events(): void
+    {
+        $events = $this->events(3, 'wide');
+        foreach ($events as $index => $event) {
+            $events[$index]['payload'] = ['body' => str_repeat('y', 400)];
+        }
+        $this->spool->write($events);
+        $stored = $this->spool->read($this->spool->files()[0]);
+        $limit = $this->encodedLength([$stored[0]]);
+        $this->assertGreaterThan($limit, $this->encodedLength([$stored[0], $stored[1]]));
+
+        $client = new FakeCentralClient();
+        $drainer = $this->drainer($client, 100, $limit);
+        $seen = [];
+        $guard = 0;
+
+        do {
+            $before = count($client->posts);
+            $result = $drainer->drainOnce();
+            if (count($client->posts) > $before) {
+                $batch = $client->eventsOfPost(count($client->posts) - 1);
+                $this->assertLessThanOrEqual(100, count($batch));
+                $this->assertLessThanOrEqual($limit, $this->encodedLength($batch));
+                foreach ($batch as $event) {
+                    $seen[] = $event['ingest_id'];
+                }
+            }
+            $guard++;
+        } while ($result['outcome'] !== Drainer::IDLE && $guard < 8);
+
+        $this->assertSame(['wide-0', 'wide-1', 'wide-2'], $seen);
+        $this->assertCount(3, $client->posts);
+        $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_an_oversized_event_between_normal_ones_is_counted_once_across_retry(): void
+    {
+        $events = $this->events(3, 'mix');
+        $events[1]['payload'] = ['body' => str_repeat('z', 4000)];
+        $this->spool->write($events);
+        $stored = $this->spool->read($this->spool->files()[0]);
+        $limit = $this->encodedLength([$stored[0], $stored[2]]);
+        $this->assertGreaterThan($limit, $this->encodedLength([$stored[1]]));
+        $contents = file_get_contents($this->spool->files()[0]->path);
+
+        $client = new FakeCentralClient(
+            new CentralResponse(503, 'maintenance'),
+            new CentralResponse(200, '{"accepted":2}'),
+        );
+        $drainer = $this->drainer($client, 100, $limit);
+
+        $first = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::RETRY, $first['outcome']);
+        $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame(['mix-0', 'mix-2'], array_column($client->eventsOfPost(0), 'ingest_id'));
+        $this->assertSame($contents, file_get_contents($this->spool->files()[0]->path));
+
+        $this->now += 10;
+        $second = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::SENT, $second['outcome']);
+        $this->assertSame(['mix-0', 'mix-2'], array_column($client->eventsOfPost(1), 'ingest_id'));
+        $this->assertSame(1, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertSame([], $this->spool->files());
+    }
+
+    public function test_failed_replace_keeps_the_original_spool_file(): void
+    {
+        $this->spool->write($this->events(150, 'keep'));
+        $before = $this->spool->files()[0];
+        $contents = file_get_contents($before->path);
+        $failing = new FileSpool(
+            $this->dir,
+            1024 * 1024,
+            100,
+            3600,
+            new FailingSpoolWriter(),
+            $this->recorder,
+            fn (): int => (int) $this->now,
+        );
+        $client = new FakeCentralClient(new CentralResponse(200, '{"accepted":100}'));
+        $drainer = new Drainer(
+            $failing,
+            $client,
+            'https://central.example.test/api/v1/ingest',
+            'key-a',
+            100,
+            5000,
+            new Backoff(1000, 8000, static fn (int $min, int $max): int => $max),
+            $this->recorder,
+            fn (): float => $this->now,
+        );
+
+        $result = $drainer->drainOnce();
+
+        $this->assertSame(Drainer::SENT, $result['outcome']);
+        $this->assertSame(100, $result['sent']);
+        $this->assertSame(0, $result['files']);
+        $this->assertSame(150, $result['remaining']);
+        $this->assertSame(0, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $this->assertFileExists($before->path);
+        $this->assertSame($contents, file_get_contents($before->path));
+        $this->assertSame([$before->name()], array_map(static fn ($file) => $file->name(), $failing->files()));
+        $this->assertSame([], glob($this->dir.'/*.tmp') ?: []);
     }
 
     public function test_single_file_that_only_exceeds_limit_after_json_wrapper_is_dropped(): void

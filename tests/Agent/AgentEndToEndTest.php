@@ -349,4 +349,61 @@ final class AgentEndToEndTest extends TestCase
         $this->assertSame('request', json_decode(trim($payloads[0]), true)['type']);
         $this->assertSame(0, $this->app->make(Recorder::class)->count(Reason::AGENT_UNREACHABLE));
     }
+
+    public function test_a_burst_larger_than_the_batch_is_drained_without_loss(): void
+    {
+        // limit+3 log calls: 1 request + limit logs + 1 overflow completeness.
+        // The default Unix socket buffer is 8KB and this test cannot read while
+        // the request is still writing, so a 152-event payload would time out
+        // on the socket. Loopback TCP has room for the whole batch; the
+        // production agent reads concurrently and does not hit that limit.
+        foreach ([150 => 152, 200 => 202] as $limit => $expected) {
+            $probe = stream_socket_server('tcp://127.0.0.1:0');
+            $this->assertIsResource($probe);
+            $address = stream_socket_get_name($probe, false);
+            fclose($probe);
+
+            config(['watch.log_buffer_limit' => $limit, 'watch.transport.endpoint' => 'tcp://'.$address]);
+            $listener = new Listener(Endpoint::fromConfig('tcp://'.$address, '/unused'));
+            $listener->start();
+
+            try {
+                $this->assertSame(200, $this->get('/burst')->getStatusCode());
+                $payloads = $listener->accept(500);
+                $this->assertCount(1, $payloads);
+                $ingested = $this->receiver(1000)->ingest($payloads[0], 'key-a');
+                $this->assertTrue($ingested['spooled']);
+                $this->assertSame(0, $ingested['invalid']);
+                $this->assertSame($expected, $ingested['accepted']);
+
+                $client = new FakeCentralClient();
+                $drainer = $this->drainer($client);
+                $ids = [];
+                $guard = 0;
+
+                do {
+                    $before = count($client->posts);
+                    $result = $drainer->drainOnce();
+                    if (count($client->posts) > $before) {
+                        $batch = $client->eventsOfPost(count($client->posts) - 1);
+                        $this->assertLessThanOrEqual(100, count($batch));
+                        $this->assertNotSame([], $batch);
+                        foreach ($batch as $event) {
+                            $ids[] = $event['ingest_id'];
+                        }
+                    }
+                    $guard++;
+                } while ($result['outcome'] !== Drainer::IDLE && $guard < 8);
+
+                $this->assertSame($expected, count($ids));
+                $this->assertSame($ids, array_values(array_unique($ids)));
+                $this->assertSame(0, $this->agentRecorder->count(Reason::TRANSPORT_ERROR));
+                $this->assertSame(0, $this->app->make(Recorder::class)->count(Reason::TIMEOUT));
+                $this->assertSame([], $this->spoolFiles());
+                $this->assertLessThan(8, $guard);
+            } finally {
+                $listener->stop();
+            }
+        }
+    }
 }

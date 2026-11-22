@@ -20,6 +20,10 @@ final class FilesystemSpoolWriter implements SpoolWriter
             return false;
         }
 
+        // The .tmp is renamed into place, and rename keeps this mode. chmod
+        // (not umask) so a web worker never changes the process-wide mask.
+        @chmod($path, 0660);
+
         return true;
     }
 }

@@ -186,4 +186,105 @@ final class FileSpoolTest extends TestCase
         $this->assertSame([['a' => 1], ['z' => true]], $decoded['events']);
         $this->assertSame(2, $decoded['invalid']);
     }
+
+    public function test_replace_keeps_the_microsecond_prefix_event_count_mtime_and_order(): void
+    {
+        $spool = $this->spool();
+        $this->assertNull($spool->write($this->events(3, 'keep')));
+        $path = $spool->files()[0]->path;
+        touch($path, $this->now - 50);
+        clearstatcache(true, $path);
+        $original = $spool->files()[0];
+        $this->assertSame($this->now - 50, $original->modifiedAt);
+        $this->assertSame(1, preg_match('/^(\d{17})-3-[0-9a-f]{8}\.ndjson$/', $original->name(), $match));
+        $remaining = [$spool->read($original)[2]];
+
+        $this->assertTrue($spool->replace($original, $remaining));
+
+        $files = $spool->files();
+        $this->assertCount(1, $files);
+        $this->assertMatchesRegularExpression('/^'.$match[1].'-1-[0-9a-f]{8}\.ndjson$/', $files[0]->name());
+        $this->assertSame(1, $files[0]->events);
+        $this->assertSame($original->modifiedAt, $files[0]->modifiedAt);
+        $this->assertSame(['keep2'], array_column($spool->read($files[0]), 'ingest_id'));
+        $this->assertFileDoesNotExist($original->path);
+        $this->assertSame([], glob($this->dir.'/*.tmp') ?: []);
+
+        usleep(2000);
+        $this->assertNull($spool->write($this->events(1, 'newer')));
+        $ids = array_map(fn ($file) => $spool->read($file)[0]['ingest_id'], $spool->files());
+        $this->assertSame(['keep2', 'newer0'], $ids);
+    }
+
+    public function test_replace_of_an_unpatterned_name_uses_the_current_micros(): void
+    {
+        $spool = $this->spool();
+        mkdir($this->dir, 0770, true);
+        $path = $this->dir.'/not-a-pattern.ndjson';
+        file_put_contents($path, "{\"type\":\"log\",\"ingest_id\":\"odd\"}\n");
+        touch($path, $this->now - 30);
+        clearstatcache(true, $path);
+        $original = $spool->files()[0];
+
+        $this->assertTrue($spool->replace($original, [['type' => 'log', 'ingest_id' => 'odd']]));
+
+        $files = $spool->files();
+        $this->assertCount(1, $files);
+        $this->assertMatchesRegularExpression('/^\d{17}-1-[0-9a-f]{8}\.ndjson$/', $files[0]->name());
+        $this->assertSame($original->modifiedAt, $files[0]->modifiedAt);
+        $this->assertFileDoesNotExist($path);
+    }
+
+    public function test_replace_of_an_empty_list_deletes_the_file(): void
+    {
+        $spool = $this->spool();
+        $this->assertNull($spool->write($this->events(1, 'gone')));
+        $file = $spool->files()[0];
+
+        $this->assertTrue($spool->replace($file, []));
+        $this->assertSame([], $spool->files());
+        $this->assertSame(0, $this->recorder->count(Reason::SPOOL_FULL));
+    }
+
+    public function test_replace_failure_leaves_the_original_file_in_place(): void
+    {
+        $spool = $this->spool();
+        $this->assertNull($spool->write($this->events(2, 'stay')));
+        $original = $spool->files()[0];
+        $contents = file_get_contents($original->path);
+        $failing = new FileSpool($this->dir, 1024 * 1024, 100, 3600, new FailingSpoolWriter(), $this->recorder, fn (): int => $this->now);
+
+        $this->assertFalse($failing->replace($original, [$this->events(1, 'nope')[0]]));
+        $this->assertFileExists($original->path);
+        $this->assertSame($contents, file_get_contents($original->path));
+        $this->assertSame([$original->name()], array_map(static fn ($file) => $file->name(), $failing->files()));
+        $this->assertSame([], glob($this->dir.'/*.tmp') ?: []);
+        $this->assertSame(0, $this->recorder->count(Reason::SPOOL_ENOSPC));
+    }
+
+    public function test_new_spool_files_are_not_world_accessible(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('POSIX permissions are not available on Windows.');
+        }
+
+        $previous = umask(0022);
+        try {
+            if (! is_dir($this->dir)) {
+                mkdir($this->dir, 0755);
+            }
+            chmod($this->dir, 0755);
+
+            $spool = $this->spool();
+            $this->assertNull($spool->write($this->events(1, 'perm')));
+            $path = $spool->files()[0]->path;
+            clearstatcache(true, $path);
+            $perms = fileperms($path) & 0777;
+
+            $this->assertSame(0, $perms & 0007);
+            $this->assertSame(0660, $perms);
+        } finally {
+            umask($previous);
+        }
+    }
 }

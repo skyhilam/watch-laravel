@@ -191,6 +191,61 @@ final class FileSpool
     }
 
     /**
+     * Replace one spool file with the events that still have to be sent.
+     *
+     * The new name keeps the original microsecond prefix, so oldest-first
+     * order does not change, and the original mtime is restored so
+     * max_age_seconds does not start over. An empty list deletes the file.
+     * Any failure leaves the original file in place. The replacement is
+     * smaller than the file it replaces, so the spool limits are not applied.
+     *
+     * @param list<array<string, mixed>> $events
+     */
+    public function replace(SpoolFile $file, array $events): bool
+    {
+        if ($events === []) {
+            $this->delete($file);
+
+            return true;
+        }
+
+        $encoded = Ndjson::encode($events);
+        if ($encoded['payload'] === '' || $encoded['encoded'] < 1 || $encoded['skipped'] > 0) {
+            return false;
+        }
+
+        $final = $this->path.'/'.$this->replacementName($file, $encoded['encoded']);
+        $tmp = $final.self::TMP_SUFFIX;
+
+        try {
+            $ok = $this->writer->write($tmp, $encoded['payload']);
+        } catch (Throwable) {
+            $ok = false;
+        }
+
+        if (! $ok || ! @rename($tmp, $final)) {
+            @unlink($tmp);
+
+            return false;
+        }
+
+        @touch($final, $file->modifiedAt);
+        clearstatcache(true, $final);
+
+        if ($final !== $file->path) {
+            @unlink($file->path);
+            clearstatcache(true, $file->path);
+            if (is_file($file->path)) {
+                @unlink($final);
+
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
      * Remove files older than max_age_seconds (and stale .tmp files). Returns
      * the number of events expired; each is counted as spool_expired.
      */
@@ -240,6 +295,18 @@ final class FileSpool
         $micros = (int) floor(microtime(true) * 1_000_000);
 
         return sprintf('%017d-%d-%s%s', $micros, $events, bin2hex(random_bytes(4)), self::SUFFIX);
+    }
+
+    private function replacementName(SpoolFile $file, int $events): string
+    {
+        $name = $file->name();
+        if (preg_match('/^(\d+)-\d+-[0-9a-f]+\.ndjson$/', $name, $match) === 1) {
+            $micros = $match[1];
+        } else {
+            $micros = sprintf('%017d', (int) floor(microtime(true) * 1_000_000));
+        }
+
+        return $micros.'-'.$events.'-'.bin2hex(random_bytes(4)).self::SUFFIX;
     }
 
     private function eventsFromName(string $name): int

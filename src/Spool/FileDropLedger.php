@@ -93,6 +93,10 @@ final class FileDropLedger implements DropLedger
         }
 
         try {
+            // 'c+' creates the file with the process umask (often 0644). Tighten
+            // it here; chmod is thread-safe and a failure stays fail-open.
+            @chmod($this->path(), 0660);
+
             if (! $this->lock($handle, $wait)) {
                 return false;
             }

@@ -104,4 +104,49 @@ final class FileDropLedgerTest extends TestCase
 
         $this->assertSame([Reason::SPOOL_FULL => 1], $ledger->take());
     }
+
+    public function test_a_new_ledger_in_an_existing_directory_is_not_world_accessible(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('POSIX permissions are not available on Windows.');
+        }
+
+        $previous = umask(0022);
+        try {
+            mkdir($this->dir, 0755);
+            chmod($this->dir, 0755);
+            $ledger = new FileDropLedger($this->dir);
+
+            $this->assertTrue($ledger->add([Reason::SPOOL_FULL => 1]));
+            clearstatcache(true, $ledger->path());
+            $perms = fileperms($ledger->path()) & 0777;
+
+            $this->assertSame(0, $perms & 0007);
+            $this->assertSame(0660, $perms);
+        } finally {
+            umask($previous);
+        }
+    }
+
+    public function test_an_existing_world_readable_ledger_is_tightened_to_0660(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('POSIX permissions are not available on Windows.');
+        }
+
+        mkdir($this->dir, 0755);
+        chmod($this->dir, 0755);
+        $path = $this->dir.'/'.FileDropLedger::FILE;
+        file_put_contents($path, '{}');
+        chmod($path, 0644);
+        clearstatcache(true, $path);
+        $this->assertSame(0644, fileperms($path) & 0777);
+
+        $ledger = new FileDropLedger($this->dir);
+        $this->assertTrue($ledger->add([Reason::SPOOL_FULL => 1]));
+        clearstatcache(true, $path);
+
+        $this->assertSame(0, (fileperms($path) & 0777) & 0007);
+        $this->assertSame(0660, fileperms($path) & 0777);
+    }
 }
