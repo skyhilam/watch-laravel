@@ -215,6 +215,105 @@ final class RedactionTest extends TestCase
         yield 'hyphenated api key' => ['api-key=abc ok=1', 'api-key=[redacted] ok=1'];
     }
 
+    /**
+     * Quoted JSON keys sit a closing quote away from ":" / "=". Bare assignments stay covered.
+     *
+     * @param  array<string, mixed>  $config
+     *
+     * @dataProvider quotedJsonRedactions
+     */
+    #[DataProvider('quotedJsonRedactions')]
+    public function test_redact_message_masks_quoted_json_key_value_pairs(string $message, string $expected, array $config = []): void
+    {
+        if ($config !== []) {
+            config($config);
+        }
+
+        $this->assertSame($expected, $this->app->make(Redactor::class)->redactMessage($message));
+    }
+
+    /**
+     * @return iterable<string, array{0: string, 1: string, 2?: array<string, mixed>}>
+     */
+    public static function quotedJsonRedactions(): iterable
+    {
+        yield 'double quoted compact' => [
+            '{"access_token":"tok-123","password":"hunter2","email":"ada@example.com"}',
+            '{"access_token":"[redacted]","password":"[redacted]","email":"ada@example.com"}',
+            [],
+        ];
+        yield 'double quoted with spaces' => [
+            '{"Password": "two words", "X-API-Key": "key-123", "ok": true}',
+            '{"Password": "[redacted]", "X-API-Key": "[redacted]", "ok": true}',
+            [],
+        ];
+        yield 'single quoted keys' => [
+            "{'access_token': 'tok-123', 'email': 'ada@example.com'}",
+            "{'access_token': '[redacted]', 'email': 'ada@example.com'}",
+            [],
+        ];
+        yield 'escaped quote inside a double quoted value' => [
+            '{"password":"a\\"b","ok":true}',
+            '{"password":"[redacted]","ok":true}',
+            [],
+        ];
+        yield 'escaped quote inside a single quoted value' => [
+            '{\'password\':\'a\\\'b\',\'ok\':true}',
+            '{\'password\':\'[redacted]\',\'ok\':true}',
+            [],
+        ];
+        yield 'unquoted number keeps the closing brace' => [
+            '{"cvv":123}',
+            '{"cvv":[redacted]}',
+            [],
+        ];
+        yield 'unquoted number keeps the following field' => [
+            '{"cvv":123,"ok":true}',
+            '{"cvv":[redacted],"ok":true}',
+            [],
+        ];
+        yield 'unquoted number inside an array keeps the bracket' => [
+            '[{"cvv":123}]',
+            '[{"cvv":[redacted]}]',
+            [],
+        ];
+        yield 'empty double quoted value' => [
+            '{"password":""}',
+            '{"password":"[redacted]"}',
+            [],
+        ];
+        yield 'json authorization bearer keeps the scheme' => [
+            '{"Authorization":"Bearer super-secret-token"}',
+            '{"Authorization":"Bearer [redacted]"}',
+            [],
+        ];
+        yield 'json authorization basic keeps the scheme' => [
+            '{"Authorization":"Basic dXNlcjpwYXNz"}',
+            '{"Authorization":"Basic [redacted]"}',
+            [],
+        ];
+        yield 'non sensitive value may mention a secret word' => [
+            '{"message":"invalid password","email":"ada@example.com"}',
+            '{"message":"invalid password","email":"ada@example.com"}',
+            [],
+        ];
+        yield 'unpaired quoted phrase is not a key' => [
+            '"invalid password": "x"',
+            '"invalid password": "x"',
+            [],
+        ];
+        yield 'configured key in double quoted json' => [
+            '{"synthetic_pin":"999","visible":"safe"}',
+            '{"synthetic_pin":"[redacted]","visible":"safe"}',
+            ['watch.redact' => ['synthetic_pin']],
+        ];
+        yield 'configured key in single quoted json' => [
+            "{'synthetic_pin': '999'}",
+            "{'synthetic_pin': '[redacted]'}",
+            ['watch.redact' => ['synthetic_pin']],
+        ];
+    }
+
     public function test_redact_message_uses_configured_keys_without_changing_array_or_header_redaction(): void
     {
         config(['watch.redact' => ['synthetic_pin']]);
@@ -223,6 +322,14 @@ final class RedactionTest extends TestCase
         $this->assertSame(
             'synthetic_pin=[redacted] visible=safe',
             $redactor->redactMessage('synthetic_pin=999 visible=safe'),
+        );
+        $this->assertSame(
+            '{"synthetic_pin":"[redacted]","visible":"safe"}',
+            $redactor->redactMessage('{"synthetic_pin":"999","visible":"safe"}'),
+        );
+        $this->assertSame(
+            "{'synthetic_pin': '[redacted]'}",
+            $redactor->redactMessage("{'synthetic_pin': '999'}"),
         );
         $this->assertSame('password=secret', $redactor->redact('password=secret'));
         $this->assertSame(

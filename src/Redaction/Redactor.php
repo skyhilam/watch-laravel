@@ -77,8 +77,9 @@ final class Redactor
 
     /**
      * Mask secrets inside an exception message. Array and header redaction are
-     * unchanged: this only rewrites key=value / key: value, Authorization
-     * bearer or basic tokens, URL userinfo, and sensitive query parameters.
+     * unchanged: this only rewrites key=value / key: value, quoted JSON pairs
+     * such as "password":"..." and 'token':'...', Authorization bearer or basic
+     * tokens, URL userinfo, and sensitive query parameters.
      * A regex failure replaces the whole message so the raw secret is not kept.
      */
     public function redactMessage(string $message): string
@@ -260,10 +261,12 @@ final class Redactor
             return $message;
         }
 
-        $pattern = '~(?<![A-Za-z0-9_-])('.$keys.')(\s*[:=]\s*)(?:"([^"]*)"|\'([^\']*)\'|((?:bearer|basic|digest)\s+\S+)|([^\s&#,;"\']+))~i';
+        // Paired quotes around the key ("password" / 'password') are part of the
+        // key. String values accept escapes; a bare value stops before } or ].
+        $pattern = '~((["\'])(?:'.$keys.')\2|(?<![A-Za-z0-9_-])(?:'.$keys.'))(\s*[:=]\s*)(?:"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"|\'([^\'\\\\]*(?:\\\\.[^\'\\\\]*)*)\'|((?:bearer|basic|digest)\s+\S+)|([^\s&#,;"\'}\]]+))~i';
         $redacted = preg_replace_callback($pattern, static function (array $match): string {
-            $prefix = $match[1].$match[2];
-            $scheme = $match[5] ?? '';
+            $prefix = $match[1].$match[3];
+            $scheme = $match[6] ?? '';
             if (is_string($scheme) && $scheme !== '') {
                 $name = preg_split('/\s+/', $scheme, 2);
                 $label = is_array($name) && isset($name[0]) && is_string($name[0]) ? $name[0] : 'Bearer';
@@ -274,6 +277,13 @@ final class Redactor
             $quote = '';
             if (preg_match('/[:=]\s*(["\'])/', $match[0], $found) === 1) {
                 $quote = $found[1];
+            }
+
+            if ($quote === '"' || $quote === '\'') {
+                $inner = $quote === '"' ? (string) ($match[4] ?? '') : (string) ($match[5] ?? '');
+                if (preg_match('/^((?:bearer|basic|digest)\s+)\S+\z/i', $inner, $schemeMatch) === 1) {
+                    return $prefix.$quote.$schemeMatch[1].Redactor::REPLACEMENT.$quote;
+                }
             }
 
             return $prefix.$quote.Redactor::REPLACEMENT.$quote;
