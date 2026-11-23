@@ -16,6 +16,7 @@ use Watch\Laravel\Context\RequestContext;
 use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
 use Watch\Laravel\Redaction\Redactor;
+use WeakMap;
 
 /**
  * Fail-open exception capture. A collector or transport error must never
@@ -34,8 +35,8 @@ final class ExceptionCollector
 
     public const DEFAULT_MAX_PREVIOUS = 3;
 
-    /** @var array<int, true> */
-    private array $attached = [];
+    /** @var WeakMap<object, true> */
+    private WeakMap $attached;
 
     private bool $busy = false;
 
@@ -49,7 +50,9 @@ final class ExceptionCollector
         private readonly Container $container,
         private readonly Recorder $recorder,
         private readonly RequestEnvelopeFactory $envelopes,
-    ) {}
+    ) {
+        $this->attached = new WeakMap();
+    }
 
     public function enabled(): bool
     {
@@ -84,16 +87,15 @@ final class ExceptionCollector
                 return;
             }
 
-            $id = spl_object_id($handler);
-            if (isset($this->attached[$id])) {
+            if (isset($this->attached[$handler])) {
                 return;
             }
 
-            $this->attached[$id] = true;
             $collector = $this;
             $handler->reportable(static function (Throwable $throwable) use ($collector): void {
                 $collector->record($throwable, null);
             });
+            $this->attached[$handler] = true;
         } catch (Throwable) {
             // Attaching must not break the host handler.
         }

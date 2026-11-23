@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Watch\Laravel\Tests;
 
 use Illuminate\Foundation\Auth\User;
+use Illuminate\Foundation\Exceptions\Handler;
 use Illuminate\Http\Response;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Support\Facades\DB;
@@ -413,6 +414,60 @@ final class ExceptionCollectorTest extends TestCase
         $this->assertSame('req-response', $event['request_id']);
         $this->assertSame('0123456789abcdef0123456789abcdef', $event['trace_id']);
         $this->assertSame('password=[redacted]', $event['message']);
+    }
+
+    public function test_rebuilt_handler_reports_once_and_released_handlers_are_forgotten(): void
+    {
+        $collector = $this->app->make(ExceptionCollector::class);
+        $attached = new \ReflectionProperty($collector, 'attached');
+        $initialCount = count($attached->getValue($collector));
+        $newHandler = fn () => new class($this->app) extends Handler {
+            public function reportCallbackCount(): int
+            {
+                return count($this->reportCallbacks);
+            }
+        };
+
+        $handler = $newHandler();
+        $initialHooks = $handler->reportCallbackCount();
+        $collector->attach($handler);
+        $collector->attach($handler);
+        $this->assertSame($initialHooks + 1, $handler->reportCallbackCount());
+        $handler->report(new \RuntimeException('first handler'));
+        $collector->flush();
+
+        $reference = \WeakReference::create($handler);
+        unset($handler);
+        $replacement = $newHandler();
+        $this->assertNull($reference->get());
+        $collector->attach($replacement);
+        $replacement->report(new \RuntimeException('replacement handler'));
+        $collector->flush();
+
+        $events = $this->transport->ofType('exception');
+        $this->assertSame(['first handler', 'replacement handler'], array_column($events, 'message'));
+        unset($replacement);
+        $this->assertCount($initialCount, $attached->getValue($collector));
+    }
+
+    public function test_attach_retries_after_reportable_registration_fails(): void
+    {
+        $collector = $this->app->make(ExceptionCollector::class);
+        $handler = new class {
+            public int $attempts = 0;
+
+            public function reportable(callable $callback): void
+            {
+                if (++$this->attempts === 1) {
+                    throw new \RuntimeException('registration failed');
+                }
+            }
+        };
+
+        $collector->attach($handler);
+        $collector->attach($handler);
+        $collector->attach($handler);
+        $this->assertSame(2, $handler->attempts);
     }
 
     public function test_outside_a_request_the_request_id_is_null(): void
