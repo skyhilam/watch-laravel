@@ -107,6 +107,30 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Collectors
+    |--------------------------------------------------------------------------
+    |
+    | 每個 collector 一個 sibling key，之後可以加 query／job 等而不改 request capture。
+    | 舊版已發佈 config 冇 collectors 時，exception 預設開啟。
+    | 程式逐項讀取：缺 key、錯型別或非正整數限額回退下面嘅預設。0 唔代表無限。
+    | enabled 只接受 bool。其他型別當作未設定，維持預設開啟。
+    | 全路徑 fail-open：collector 或 transport 出錯都唔可以改業務 response。
+    |
+    */
+
+    'collectors' => [
+        'exception' => [
+            'enabled' => true,
+            'max_message_bytes' => 8192, // 遮罩之後先截斷，唔會切斷成半個 UTF-8。
+            'max_frames' => 50, // 只留最接近 throw 嘅幀，唔收 args。
+            'max_frame_bytes' => 512, // file 同 call 各自上限。
+            'max_stack_bytes' => 8192, // 成個 stack JSON；放唔落就由最遠嘅幀開始丟。
+            'max_previous' => 3, // previous 鏈只留 class／message／file／line，冇 stack。
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Log buffer limit
     |--------------------------------------------------------------------------
     |

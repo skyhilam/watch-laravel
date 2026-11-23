@@ -62,6 +62,26 @@ final class RequestEnvelopeFactory
     }
 
     /**
+     * Exception events keep request_id null outside a request. Trace fields are
+     * added only when this request captured a valid traceparent.
+     *
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    public function exception(RequestContext $context, array $fields): array
+    {
+        $event = $fields;
+        $event['type'] = 'exception';
+        $event['ingest_id'] = $this->ingestId();
+        $event['request_id'] = $context->isActive() ? $context->requestId() : null;
+        if (! isset($event['occurred_at']) || ! is_string($event['occurred_at']) || $event['occurred_at'] === '') {
+            $event['occurred_at'] = $this->stamp(null);
+        }
+
+        return $this->withTrace($event, $context);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function completeness(

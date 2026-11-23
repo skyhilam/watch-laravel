@@ -9,6 +9,7 @@ use Illuminate\Container\Container as CurrentContainer;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
+use Watch\Laravel\Capture\ExceptionCollector;
 use Watch\Laravel\Capture\Limits;
 use Watch\Laravel\Capture\MemoryCapture;
 use Watch\Laravel\Capture\RequestDetails;
@@ -30,6 +31,7 @@ final class RequestCapturer
         private readonly Redactor $redactor,
         private readonly Recorder $recorder,
         private readonly RequestEnvelopeFactory $envelopes,
+        private readonly ExceptionCollector $exceptions,
     ) {}
 
     public function enabled(): bool
@@ -39,6 +41,20 @@ final class RequestCapturer
 
     public function begin(Request $request): void
     {
+        try {
+            $this->exceptions->forgetResponseNote();
+            $this->exceptions->attachFromContainer();
+        } catch (Throwable) {
+            // Attaching the collector must not block the request.
+        }
+        try {
+            if (! $this->context()->isActive()) {
+                $this->exceptions->flush(null);
+            }
+        } catch (Throwable) {
+            // A leftover buffer must not block this request.
+        }
+
         $decision = $this->sampler->decide();
         $parsed = Traceparent::parse($request->headers->get('traceparent'));
         $limit = config('watch.log_buffer_limit', 200);
@@ -63,12 +79,23 @@ final class RequestCapturer
     {
         $context = $this->context();
         if (! $context->isActive()) {
+            try {
+                $this->exceptions->flush($response);
+            } catch (Throwable) {
+                // Flushing must not change the response.
+            }
+
             return;
         }
 
         try {
             $this->capture($context, $request, $response);
         } finally {
+            try {
+                $this->exceptions->flush($response);
+            } catch (Throwable) {
+                // The request envelope was already handed to transport.
+            }
             $context->reset();
         }
     }

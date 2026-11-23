@@ -75,6 +75,29 @@ final class Redactor
         return $this->redactArray($value, $this->sensitiveKeys());
     }
 
+    /**
+     * Mask secrets inside an exception message. Array and header redaction are
+     * unchanged: this only rewrites key=value / key: value, Authorization
+     * bearer or basic tokens, URL userinfo, and sensitive query parameters.
+     * A regex failure replaces the whole message so the raw secret is not kept.
+     */
+    public function redactMessage(string $message): string
+    {
+        if ($message === '') {
+            return $message;
+        }
+
+        if (strlen($message) > 65536) {
+            $message = substr($message, 0, 65536);
+        }
+
+        $message = $this->redactUserinfo($message);
+        $message = $this->redactBearer($message);
+        $message = $this->redactAssignments($message);
+
+        return $message;
+    }
+
     public function isSensitiveKey(string $key): bool
     {
         return $this->sensitive($key, $this->sensitiveKeys());
@@ -195,6 +218,88 @@ final class Redactor
         }
 
         return '';
+    }
+
+    private function redactUserinfo(string $message): string
+    {
+        $redacted = preg_replace(
+            '~\b([a-z][a-z0-9+.-]*://)[^\s/@]+:[^\s/@]+@~i',
+            '$1'.self::REPLACEMENT.'@',
+            $message,
+        );
+
+        return is_string($redacted) ? $redacted : self::REPLACEMENT;
+    }
+
+    private function redactBearer(string $message): string
+    {
+        $redacted = preg_replace(
+            '~\b((?:proxy-)?authorization\s*[:=]\s*(?:bearer|basic|digest)\s+)\S+~i',
+            '$1'.self::REPLACEMENT,
+            $message,
+        );
+        if (! is_string($redacted)) {
+            return self::REPLACEMENT;
+        }
+
+        // `#` is the delimiter: the token class includes `~`, which would
+        // otherwise close a `~`-delimited pattern (Unknown modifier '+').
+        $redacted = preg_replace(
+            '#\b(bearer\s+)([A-Za-z0-9\-._~+/=]{8,})#i',
+            '$1'.self::REPLACEMENT,
+            $redacted,
+        );
+
+        return is_string($redacted) ? $redacted : self::REPLACEMENT;
+    }
+
+    private function redactAssignments(string $message): string
+    {
+        $keys = $this->assignmentKeys();
+        if ($keys === '') {
+            return $message;
+        }
+
+        $pattern = '~(?<![A-Za-z0-9_-])('.$keys.')(\s*[:=]\s*)(?:"([^"]*)"|\'([^\']*)\'|((?:bearer|basic|digest)\s+\S+)|([^\s&#,;"\']+))~i';
+        $redacted = preg_replace_callback($pattern, static function (array $match): string {
+            $prefix = $match[1].$match[2];
+            $scheme = $match[5] ?? '';
+            if (is_string($scheme) && $scheme !== '') {
+                $name = preg_split('/\s+/', $scheme, 2);
+                $label = is_array($name) && isset($name[0]) && is_string($name[0]) ? $name[0] : 'Bearer';
+
+                return $prefix.$label.' '.Redactor::REPLACEMENT;
+            }
+
+            $quote = '';
+            if (preg_match('/[:=]\s*(["\'])/', $match[0], $found) === 1) {
+                $quote = $found[1];
+            }
+
+            return $prefix.$quote.Redactor::REPLACEMENT.$quote;
+        }, $message);
+
+        return is_string($redacted) ? $redacted : self::REPLACEMENT;
+    }
+
+    private function assignmentKeys(): string
+    {
+        $keys = $this->keys();
+        usort($keys, static function (string $left, string $right): int {
+            return strlen($right) <=> strlen($left);
+        });
+
+        $parts = [];
+        foreach ($keys as $key) {
+            $normalized = $this->normalize($key);
+            if ($normalized === '') {
+                continue;
+            }
+            $parts[str_replace('_', '[-_]', preg_quote($normalized, '~'))] = true;
+        }
+        $parts['[a-z0-9_-]*(?:password|passwd|secret|token|apikey|api[-_]?key)[a-z0-9_-]*'] = true;
+
+        return implode('|', array_keys($parts));
     }
 
     private function url(string $value): string

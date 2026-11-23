@@ -37,6 +37,14 @@ final class RequestContext
     private $memoryScope = 'process';
 
     /**
+     * Throwables seen during this worker turn, keyed by spl_object_id.
+     * reset() drops them so the next Octane request cannot inherit them.
+     *
+     * @var array<int, array{throwable: \Throwable, handled: bool, occurred_at: string}>
+     */
+    private array $exceptions = [];
+
+    /**
      * The context of the request being handled right now.
      *
      * Long-lived singletons (the log processor, the capturer) can be built by
@@ -74,6 +82,51 @@ final class RequestContext
         $this->logLimit = 200;
         $this->tags = [];
         $this->memoryScope = 'process';
+        $this->exceptions = [];
+    }
+
+    public function rememberException(\Throwable $throwable, bool $handled, string $occurredAt): void
+    {
+        $id = spl_object_id($throwable);
+        if (isset($this->exceptions[$id])) {
+            if (! $handled) {
+                $this->exceptions[$id]['handled'] = false;
+            }
+
+            return;
+        }
+
+        $this->exceptions[$id] = [
+            'throwable' => $throwable,
+            'handled' => $handled,
+            'occurred_at' => $occurredAt,
+        ];
+    }
+
+    public function hasException(int $id): bool
+    {
+        return isset($this->exceptions[$id]);
+    }
+
+    public function forgetException(int $id): void
+    {
+        unset($this->exceptions[$id]);
+    }
+
+    public function bufferedExceptionCount(): int
+    {
+        return count($this->exceptions);
+    }
+
+    /**
+     * @return list<array{throwable: \Throwable, handled: bool, occurred_at: string}>
+     */
+    public function pullExceptions(): array
+    {
+        $items = array_values($this->exceptions);
+        $this->exceptions = [];
+
+        return $items;
     }
 
     public function begin(

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Tests;
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use Watch\Laravel\Redaction\Redactor;
 
 final class RedactionTest extends TestCase
@@ -170,6 +171,68 @@ final class RedactionTest extends TestCase
         $encoded = json_encode($redacted, JSON_THROW_ON_ERROR);
         $this->assertStringNotContainsString('x', $encoded);
         $this->assertSame('[object]', $redacted['o']);
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     *
+     * @dataProvider messageRedactions
+     */
+    #[DataProvider('messageRedactions')]
+    public function test_redact_message_masks_assignments_bearer_userinfo_and_query(string $message, string $expected): void
+    {
+        $this->assertSame($expected, $this->app->make(Redactor::class)->redactMessage($message));
+    }
+
+    /**
+     * @return iterable<string, array{string, string}>
+     */
+    public static function messageRedactions(): iterable
+    {
+        yield 'equals' => ['password=hunter2', 'password=[redacted]'];
+        yield 'colon and case' => ['Token: abc', 'Token: [redacted]'];
+        yield 'quoted value' => ['password: "two words"', 'password: "[redacted]"'];
+        yield 'authorization bearer' => [
+            'Authorization: Bearer super-secret-token',
+            'Authorization: Bearer [redacted]',
+        ];
+        yield 'authorization basic' => [
+            'Authorization: Basic dXNlcjpwYXNz',
+            'Authorization: Basic [redacted]',
+        ];
+        yield 'standalone bearer' => [
+            'Bearer super-secret-token',
+            'Bearer [redacted]',
+        ];
+        yield 'userinfo and query' => [
+            'https://user:s3cret@app.test/path?access_token=abc&page=2',
+            'https://[redacted]@app.test/path?access_token=[redacted]&page=2',
+        ];
+        yield 'unrelated text' => [
+            'email=ada@example.com&page=2',
+            'email=ada@example.com&page=2',
+        ];
+        yield 'hyphenated api key' => ['api-key=abc ok=1', 'api-key=[redacted] ok=1'];
+    }
+
+    public function test_redact_message_uses_configured_keys_without_changing_array_or_header_redaction(): void
+    {
+        config(['watch.redact' => ['synthetic_pin']]);
+        $redactor = $this->app->make(Redactor::class);
+
+        $this->assertSame(
+            'synthetic_pin=[redacted] visible=safe',
+            $redactor->redactMessage('synthetic_pin=999 visible=safe'),
+        );
+        $this->assertSame('password=secret', $redactor->redact('password=secret'));
+        $this->assertSame(
+            ['password' => Redactor::REPLACEMENT, 'name' => 'Ada'],
+            $redactor->redact(['password' => 'secret', 'name' => 'Ada']),
+        );
+        $this->assertSame(
+            Redactor::REPLACEMENT,
+            $redactor->headers(['Authorization' => 'Bearer super-secret-token'])['authorization'],
+        );
     }
 
 }

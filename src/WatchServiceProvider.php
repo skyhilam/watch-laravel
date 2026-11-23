@@ -12,6 +12,7 @@ use Throwable;
 use Watch\Laravel\Agent\CentralUrl;
 use Watch\Laravel\Agent\Runtime;
 use Watch\Laravel\Agent\StreamCentralClient;
+use Watch\Laravel\Capture\ExceptionCollector;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Console\AgentCommand;
 use Watch\Laravel\Console\InstallCommand;
@@ -62,6 +63,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->singleton(Sampler::class);
         $this->app->singleton(RequestEnvelopeFactory::class);
         $this->app->singleton(RequestLogProcessor::class);
+        $this->app->singleton(ExceptionCollector::class);
         $this->app->singleton(RequestCapturer::class);
         $this->app->singleton(Runtime::class, static fn (): Runtime => new Runtime());
 
@@ -87,6 +89,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerCommands();
         $this->registerLogProcessor();
         $this->registerMiddleware();
+        $this->registerExceptionCollector();
         $this->registerLifecycle();
         $this->registerE2eFixtureRoute();
     }
@@ -322,6 +325,87 @@ class WatchServiceProvider extends ServiceProvider
                 // Registering capture must not break the host app.
             }
         });
+    }
+
+    /**
+     * Exception capture is registered before Octane reset listeners so a
+     * RequestReceived flush still sees the previous buffer. The reportable
+     * callback itself is attached after boot, and again per request, because
+     * a custom handler may not implement reportable().
+     */
+    private function registerExceptionCollector(): void
+    {
+        try {
+            if (class_exists('Laravel\Octane\Events\RequestReceived')) {
+                $events = $this->app->make(Dispatcher::class);
+                $events->listen('Laravel\Octane\Events\RequestReceived', function (): void {
+                    try {
+                        $collector = $this->app->make(ExceptionCollector::class);
+                        $collector->flush(null);
+                        $collector->forgetResponseNote();
+                    } catch (Throwable) {
+                        // Octane isolation must not break the worker.
+                    }
+                });
+            }
+        } catch (Throwable) {
+            // Registering the listener must not break the host app.
+        }
+
+        $this->app->booted(function (): void {
+            try {
+                $collector = $this->app->make(ExceptionCollector::class);
+                $collector->attachFromContainer();
+                $this->listenForExceptionBoundaries($collector);
+            } catch (Throwable) {
+                // Registering the collector must not break the host app.
+            }
+        });
+    }
+
+    private function listenForExceptionBoundaries(ExceptionCollector $collector): void
+    {
+        try {
+            $events = $this->app->make(Dispatcher::class);
+        } catch (Throwable) {
+            return;
+        }
+
+        $flushOutsideRequest = static function () use ($collector): void {
+            try {
+                if (! $collector->requestIsActive()) {
+                    $collector->flush(null);
+                }
+            } catch (Throwable) {
+                // A finished command or job must not fail because capture failed.
+            }
+        };
+
+        foreach ([
+            'Illuminate\Console\Events\CommandFinished',
+            'Illuminate\Queue\Events\JobProcessed',
+        ] as $event) {
+            $events->listen($event, $flushOutsideRequest);
+        }
+
+        // The payload may be empty: Lifecycle tests dispatch the event name
+        // with no object, and Laravel then calls the listener with zero arguments.
+        $events->listen('Illuminate\Queue\Events\JobFailed', static function ($event = null) use ($collector): void {
+            try {
+                $exception = is_object($event) ? ($event->exception ?? null) : null;
+                if ($exception instanceof Throwable) {
+                    $collector->record($exception, false);
+                } elseif (! $collector->requestIsActive()) {
+                    $collector->flush(null);
+                }
+            } catch (Throwable) {
+                // A failed job must not fail again inside capture.
+            }
+        });
+
+        if (method_exists($this->app, 'terminating')) {
+            $this->app->terminating($flushOutsideRequest);
+        }
     }
 
     private function registerLifecycle(): void
