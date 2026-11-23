@@ -9,6 +9,8 @@ use Illuminate\Contracts\Container\Container;
 
 final class RequestContext
 {
+    public const DEFAULT_EXCEPTION_LIMIT = 50;
+
     private bool $active = false;
 
     private bool $sampled = false;
@@ -43,6 +45,10 @@ final class RequestContext
      * @var array<int, array{throwable: \Throwable, handled: bool, occurred_at: string}>
      */
     private array $exceptions = [];
+
+    private int $exceptionLimit = self::DEFAULT_EXCEPTION_LIMIT;
+
+    private int $exceptionOverflow = 0;
 
     /**
      * The context of the request being handled right now.
@@ -83,6 +89,8 @@ final class RequestContext
         $this->tags = [];
         $this->memoryScope = 'process';
         $this->exceptions = [];
+        $this->exceptionOverflow = 0;
+        $this->exceptionLimit = self::DEFAULT_EXCEPTION_LIMIT;
     }
 
     public function rememberException(\Throwable $throwable, bool $handled, string $occurredAt): void
@@ -94,6 +102,13 @@ final class RequestContext
             }
 
             return;
+        }
+
+        if (count($this->exceptions) >= $this->exceptionLimit) {
+            $this->exceptionOverflow++;
+            if ($this->exceptionLimit === 0 || $handled || $this->evictHandledExceptions(1) === 0) {
+                return;
+            }
         }
 
         $this->exceptions[$id] = [
@@ -118,6 +133,42 @@ final class RequestContext
         return count($this->exceptions);
     }
 
+    public function exceptionOverflow(): int
+    {
+        return $this->exceptionOverflow;
+    }
+
+    public function setExceptionLimit(int $limit): void
+    {
+        $this->exceptionLimit = max(0, $limit);
+        $excess = count($this->exceptions) - $this->exceptionLimit;
+        if ($excess <= 0) {
+            return;
+        }
+
+        $this->exceptionOverflow += $excess;
+        if ($this->evictHandledExceptions($excess) < $excess) {
+            // Only unhandled exceptions remain. Keep the first ones reported.
+            $this->exceptions = array_slice($this->exceptions, 0, $this->exceptionLimit, true);
+        }
+    }
+
+    private function evictHandledExceptions(int $count): int
+    {
+        $evicted = 0;
+        foreach ($this->exceptions as $id => $entry) {
+            if ($entry['handled']) {
+                unset($this->exceptions[$id]);
+                $evicted++;
+                if ($evicted === $count) {
+                    break;
+                }
+            }
+        }
+
+        return $evicted;
+    }
+
     /**
      * @return list<array{throwable: \Throwable, handled: bool, occurred_at: string}>
      */
@@ -125,6 +176,7 @@ final class RequestContext
     {
         $items = array_values($this->exceptions);
         $this->exceptions = [];
+        $this->exceptionOverflow = 0;
 
         return $items;
     }
