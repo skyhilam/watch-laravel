@@ -50,5 +50,18 @@ Route::get('/watch-e2e-outgoing', function () {
     return \Watch\Laravel\WatchServiceProvider::respondToE2eOutgoingFixture();
 })->name('watch.e2e.outgoing');
 
+/*
+ * Database-driver jobs for scripts/e2e.sh. Dispatch only: a separate
+ * queue:work --once process runs them. The plaintext secret stays inside
+ * the failed job's exception message. Skip when the Testbench 6 fallback
+ * already registered this name.
+ */
+require_once dirname(__DIR__).'/WatchE2eJobs.php';
 $router = app('router');
+if (! $router->has('watch.e2e.jobs')) {
+    Route::get('/watch-e2e-jobs', function () {
+        return \Watch\Laravel\Workbench\WatchE2eJobs::respond();
+    })->name('watch.e2e.jobs');
+}
+
 require __DIR__.'/request-detail.php';
