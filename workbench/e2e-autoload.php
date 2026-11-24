@@ -11,6 +11,7 @@ spl_autoload_register(static function (string $class): void {
         'Watch\\Laravel\\Workbench\\WatchE2eJobs' => '/WatchE2eJobs.php',
         'Watch\\Laravel\\Workbench\\WatchE2eProcessedJob' => '/WatchE2eProcessedJob.php',
         'Watch\\Laravel\\Workbench\\WatchE2eFailedJob' => '/WatchE2eFailedJob.php',
+        'Watch\\Laravel\\Workbench\\WatchE2eSchedule' => '/WatchE2eSchedule.php',
     ];
     if (! isset($files[$class])) {
         return;
