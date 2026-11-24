@@ -594,6 +594,9 @@ class WatchServiceProvider extends ServiceProvider
      * WATCH_E2E_FIXTURE does not get these routes. Keep the closures in sync
      * with workbench/routes/web.php. The outgoing probe is
      * respondToE2eOutgoingFixture() so Laravel 8 and 13 share one body.
+     * The slow-query probe is respondToE2eSlowQueryFixture(), which runs
+     * watch_e2e_run_slow_query() from that workbench file. The SQL therefore
+     * stays outside vendor and outside this package's src/.
      */
     private function registerE2eFixtureRoute(): void
     {
@@ -637,6 +640,12 @@ class WatchServiceProvider extends ServiceProvider
                 $router->get('/watch-e2e-outgoing', static function () {
                     return \Watch\Laravel\WatchServiceProvider::respondToE2eOutgoingFixture();
                 })->middleware('web')->name('watch.e2e.outgoing');
+            }
+
+            if (! $router->has('watch.e2e.slow-query')) {
+                $router->get('/watch-e2e-slow-query', static function () {
+                    return \Watch\Laravel\WatchServiceProvider::respondToE2eSlowQueryFixture();
+                })->middleware('web')->name('watch.e2e.slow-query');
             }
         });
     }
@@ -686,6 +695,34 @@ class WatchServiceProvider extends ServiceProvider
         }
 
         return response('watch-e2e-outgoing-ok', 200);
+    }
+
+    /**
+     * E2E only. GET /watch-e2e-slow-query runs one fast SQLite statement and
+     * one statement that sleeps past the slow-query threshold. Both carry
+     * E2E_SLOW_QUERY_SECRET_BINDING as a bound parameter. The SQL itself is
+     * watch_e2e_run_slow_query() in workbench/routes/web.php, so the captured
+     * caller is that file and not this provider.
+     *
+     * @return \Illuminate\Http\Response|\Symfony\Component\HttpFoundation\Response
+     */
+    public static function respondToE2eSlowQueryFixture()
+    {
+        if (! function_exists('watch_e2e_run_slow_query')) {
+            $watchE2eSlowQueryRunnerOnly = true;
+            $path = dirname(__DIR__).'/workbench/routes/web.php';
+            if (! is_file($path)) {
+                return response('watch-e2e-slow-query-error', 500);
+            }
+
+            require_once $path;
+        }
+
+        if (! function_exists('watch_e2e_run_slow_query')) {
+            return response('watch-e2e-slow-query-error', 500);
+        }
+
+        return watch_e2e_run_slow_query();
     }
 
     private static function e2eEnv(string $key): string
