@@ -113,6 +113,19 @@ return [
         'jobs' => [
             'enabled' => true,
         ],
+        /*
+         * 排程收集。只喺 schedule:run 行程入面收：每個 task 一件 scheduled_task
+         * （success／failed／skipped／overlapping／background），另加每次
+         * schedule:run 一件 schedule_registry。schedule:test 同其他指令唔收。
+         * 來源唔會送 missed：冇跑就冇事件，由中央按 cron expression、心跳同
+         * completeness 判斷。舊版已 publish config 冇 capture.schedule 唔使重新
+         * 發佈；缺 key、schedule 唔係 array、或者 enabled 唔係 bool，都回退開啟。
+         * 只有 bool false 先停。全路徑 fail-open，唔會改 task 結果或者
+         * schedule:run 嘅 exit code。
+         */
+        'schedule' => [
+            'enabled' => true,
+        ],
     ],
 
     /*

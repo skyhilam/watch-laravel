@@ -39,6 +39,10 @@ use Watch\Laravel\Queue\JobContext;
 use Watch\Laravel\Queue\JobSettings;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
+use Watch\Laravel\Schedule\ScheduledTaskCapturer;
+use Watch\Laravel\Schedule\ScheduleRegistry;
+use Watch\Laravel\Schedule\ScheduleSettings;
+use Watch\Laravel\Schedule\TaskIdentity;
 use Watch\Laravel\Spool\DropLedger;
 use Watch\Laravel\Spool\FileDropLedger;
 use Watch\Laravel\Spool\FileSpool;
@@ -84,6 +88,10 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->singleton(ExceptionFingerprint::class);
         $this->app->singleton(ExceptionSnapshot::class);
         $this->app->singleton(JobCapturer::class);
+        $this->app->singleton(ScheduleSettings::class);
+        $this->app->singleton(TaskIdentity::class);
+        $this->app->singleton(ScheduleRegistry::class);
+        $this->app->singleton(ScheduledTaskCapturer::class);
         $this->app->singleton(RequestCapturer::class);
         $this->app->singleton(Runtime::class, static fn (): Runtime => new Runtime());
 
@@ -112,6 +120,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerExceptionCollector();
         $this->registerOutgoingCollector();
         $this->registerJobCollector();
+        $this->registerScheduleCollector();
         $this->registerLifecycle();
         $this->registerE2eFixtureRoute();
     }
@@ -495,6 +504,21 @@ class WatchServiceProvider extends ServiceProvider
             $this->app->make(JobCapturer::class)->listen($events);
         } catch (Throwable) {
             // Registering job capture must not break the host app.
+        }
+    }
+
+    /**
+     * Scheduled task capture does not require illuminate/console. Every event
+     * class is listened to by name, and the capturer only listens to
+     * ScheduledTaskFailed when that class exists.
+     */
+    private function registerScheduleCollector(): void
+    {
+        try {
+            $events = $this->app->make(Dispatcher::class);
+            $this->app->make(ScheduledTaskCapturer::class)->listen($events);
+        } catch (Throwable) {
+            // Registering schedule capture must not break the host app.
         }
     }
 

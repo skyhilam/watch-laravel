@@ -15,7 +15,7 @@ use Watch\Laravel\Spool\Ndjson;
  */
 final class Receiver
 {
-    private const TYPES = ['request', 'log', 'completeness', 'agent_status', 'exception', 'outgoing_request', 'job'];
+    private const TYPES = ['request', 'log', 'completeness', 'agent_status', 'exception', 'outgoing_request', 'job', 'scheduled_task', 'schedule_registry'];
 
     public function __construct(
         private readonly FileSpool $spool,
