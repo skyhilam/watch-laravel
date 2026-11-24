@@ -20,6 +20,7 @@ use Watch\Laravel\Context\Traceparent;
 use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
 use Watch\Laravel\Outgoing\OutgoingRequestCollector;
+use Watch\Laravel\Query\SlowQueryListener;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 use Watch\Laravel\Support\Uuid7;
@@ -71,6 +72,11 @@ final class RequestCapturer
             $logLimit,
         );
         try {
+            $this->context()->setSlowQueryLimit($this->slowQueryLimit());
+        } catch (Throwable) {
+            // A missing limit falls back to the context default.
+        }
+        try {
             $this->requestContainer()->make(MemoryCapture::class)->begin($this->context());
         } catch (Throwable $e) {
             $this->context()->setMemoryScope('error');
@@ -117,10 +123,14 @@ final class RequestCapturer
     private function capture(RequestContext $context, Request $request, Response $response): void
     {
         if ($context->requestId() === null) {
+            $this->discardSlowQueries($context);
+
             return;
         }
 
         if (! $context->isSampled()) {
+            // Sampled-out requests stay honest: no slow queries and no overflow.
+            $this->discardSlowQueries($context);
             $this->recorder->add(Reason::SAMPLED_OUT);
             $this->send([
                 $this->envelopes->completeness(
@@ -180,7 +190,99 @@ final class RequestCapturer
             );
         }
 
+        $events = $this->appendSlowQueries($context, $events);
+
         $this->send($events);
+    }
+
+    /**
+     * Slow queries share the request batch. Overflow is query_buffer_overflow,
+     * which is not a transport drop.
+     *
+     * @param list<array<string, mixed>> $events
+     * @return list<array<string, mixed>>
+     */
+    private function appendSlowQueries(RequestContext $context, array $events): array
+    {
+        try {
+            $overflow = $context->slowQueryOverflow();
+            $pending = $context->pullSlowQueries();
+            $this->discardListenerBuffer();
+
+            foreach ($pending as $query) {
+                $event = $this->envelopes->slowQuery($context, [
+                    'normalized_sql' => $query['normalized_sql'] ?? null,
+                    'connection' => $query['connection'] ?? null,
+                    'duration_ms' => $query['duration_ms'] ?? null,
+                    'caller' => $query['caller'] ?? null,
+                    'execution_type' => 'request',
+                    'execution_id' => $context->requestId(),
+                ]);
+                if ($event !== []) {
+                    $events[] = $event;
+                }
+            }
+
+            if ($overflow > 0) {
+                $this->recorder->add(Reason::QUERY_BUFFER_OVERFLOW, $overflow);
+                $events[] = $this->envelopes->completeness(
+                    $context,
+                    Reason::QUERY_BUFFER_OVERFLOW,
+                    $overflow,
+                    true,
+                );
+            }
+        } catch (Throwable) {
+            try {
+                $this->recorder->add(Reason::TRANSPORT_ERROR);
+            } catch (Throwable) {
+                // Still fail-open when the recorder itself is unavailable.
+            }
+        }
+
+        return $events;
+    }
+
+    private function discardSlowQueries(RequestContext $context): void
+    {
+        try {
+            $context->pullSlowQueries();
+            $this->discardListenerBuffer();
+        } catch (Throwable) {
+            // Dropping a sampled-out buffer must not change the response.
+        }
+    }
+
+    private function discardListenerBuffer(): void
+    {
+        try {
+            if (! $this->container->bound(SlowQueryListener::class)) {
+                return;
+            }
+
+            $listener = $this->container->make(SlowQueryListener::class);
+            if ($listener instanceof SlowQueryListener) {
+                $listener->pull();
+            }
+        } catch (Throwable) {
+            // The listener buffer is best-effort.
+        }
+    }
+
+    private function slowQueryLimit(): int
+    {
+        try {
+            if ($this->container->bound(SlowQueryListener::class)) {
+                $listener = $this->container->make(SlowQueryListener::class);
+                if ($listener instanceof SlowQueryListener) {
+                    return $listener->maxPerExecution();
+                }
+            }
+        } catch (Throwable) {
+            // Fall through to the context default.
+        }
+
+        return RequestContext::DEFAULT_SLOW_QUERY_LIMIT;
     }
 
     /**

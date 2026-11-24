@@ -104,6 +104,76 @@ final class RequestEnvelopeFactory
     }
 
     /**
+     * One slow query. Bindings are removed here so a caller cannot attach
+     * them. ingest_id comes from Uuid7. Trace fields are added only when this
+     * execution captured a valid traceparent. An active HTTP request wins
+     * request_id; a queue job outside a request may pass its parent id.
+     *
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    public function slowQuery(RequestContext $context, array $fields): array
+    {
+        foreach (array_keys($fields) as $key) {
+            if (is_string($key) && str_replace('-', '_', strtolower($key)) === 'bindings') {
+                unset($fields[$key]);
+            }
+        }
+
+        $sql = $fields['normalized_sql'] ?? null;
+        $connection = $fields['connection'] ?? null;
+        $duration = $fields['duration_ms'] ?? null;
+        if (! is_string($sql) || $sql === '' || strpos($sql, "\0") !== false) {
+            return [];
+        }
+        if (! is_string($connection) || $connection === '' || strpos($connection, "\0") !== false) {
+            return [];
+        }
+        if (is_int($duration)) {
+            $durationMs = (float) $duration;
+        } elseif (is_float($duration) && is_finite($duration)) {
+            $durationMs = $duration;
+        } else {
+            return [];
+        }
+        if ($durationMs < 0) {
+            return [];
+        }
+
+        $event = [
+            'type' => 'slow_query',
+            'ingest_id' => $this->ingestId(),
+            'normalized_sql' => $sql,
+            'sql_hash' => hash('sha256', $sql),
+            'connection' => $connection,
+            'duration_ms' => $durationMs,
+            'executed_at' => $this->executedAt($fields['executed_at'] ?? null),
+        ];
+
+        if ($context->isActive()) {
+            $event['request_id'] = $context->requestId();
+        } elseif (isset($fields['request_id']) && is_string($fields['request_id']) && $fields['request_id'] !== '') {
+            $event['request_id'] = $fields['request_id'];
+        }
+
+        foreach (['caller', 'job_id', 'command_id', 'task_key', 'execution_type', 'execution_id'] as $key) {
+            if (! isset($fields[$key]) || ! is_string($fields[$key]) || $fields[$key] === '' || strpos($fields[$key], "\0") !== false) {
+                continue;
+            }
+            $event[$key] = $fields[$key];
+        }
+
+        if (isset($fields['trace_id']) && is_string($fields['trace_id']) && $fields['trace_id'] !== '') {
+            $event['trace_id'] = $fields['trace_id'];
+        }
+        if (isset($fields['traceparent']) && is_string($fields['traceparent']) && $fields['traceparent'] !== '') {
+            $event['traceparent'] = $fields['traceparent'];
+        }
+
+        return $this->withTrace($event, $context);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function completeness(
@@ -157,5 +227,14 @@ final class RequestEnvelopeFactory
         $at ??= new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
 
         return $at->setTimezone(new \DateTimeZone('UTC'))->format('Y-m-d\TH:i:s\Z');
+    }
+
+    private function executedAt(mixed $value): string
+    {
+        if (is_string($value) && preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/', $value) === 1) {
+            return $value;
+        }
+
+        return $this->stamp(null);
     }
 }

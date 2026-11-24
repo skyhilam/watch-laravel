@@ -13,6 +13,8 @@ final class RequestContext
 
     public const DEFAULT_OUTGOING_LIMIT = 50;
 
+    public const DEFAULT_SLOW_QUERY_LIMIT = 50;
+
     private bool $active = false;
 
     private bool $sampled = false;
@@ -65,6 +67,18 @@ final class RequestContext
     private int $outgoingOverflow = 0;
 
     /**
+     * Slow queries for this HTTP request. reset() drops them so the next
+     * Octane request cannot inherit them. The cap is max_per_execution.
+     *
+     * @var list<array<string, mixed>>
+     */
+    private array $slowQueries = [];
+
+    private int $slowQueryLimit = self::DEFAULT_SLOW_QUERY_LIMIT;
+
+    private int $slowQueryOverflow = 0;
+
+    /**
      * The context of the request being handled right now.
      *
      * Long-lived singletons (the log processor, the capturer) can be built by
@@ -108,6 +122,9 @@ final class RequestContext
         $this->outgoingRequests = [];
         $this->outgoingOverflow = 0;
         $this->outgoingLimit = self::DEFAULT_OUTGOING_LIMIT;
+        $this->slowQueries = [];
+        $this->slowQueryOverflow = 0;
+        $this->slowQueryLimit = self::DEFAULT_SLOW_QUERY_LIMIT;
     }
 
     public function rememberException(\Throwable $throwable, bool $handled, string $occurredAt): void
@@ -242,6 +259,60 @@ final class RequestContext
 
         $this->outgoingOverflow += $excess;
         $this->outgoingRequests = array_slice($this->outgoingRequests, 0, $this->outgoingLimit);
+    }
+
+    /**
+     * Keep the first slow queries up to the limit. Later ones increment
+     * slowQueryOverflow and are not stored. A limit of 0 drops every query.
+     * Bindings are not part of this buffer.
+     *
+     * @param array<string, mixed> $entry
+     */
+    public function pushSlowQuery(array $entry): void
+    {
+        if (count($this->slowQueries) >= $this->slowQueryLimit) {
+            $this->slowQueryOverflow++;
+
+            return;
+        }
+
+        $this->slowQueries[] = $entry;
+    }
+
+    public function addSlowQueryOverflow(int $count): void
+    {
+        if ($count > 0) {
+            $this->slowQueryOverflow += $count;
+        }
+    }
+
+    public function slowQueryOverflow(): int
+    {
+        return $this->slowQueryOverflow;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function pullSlowQueries(): array
+    {
+        $items = $this->slowQueries;
+        $this->slowQueries = [];
+        $this->slowQueryOverflow = 0;
+
+        return $items;
+    }
+
+    public function setSlowQueryLimit(int $limit): void
+    {
+        $this->slowQueryLimit = max(0, $limit);
+        $excess = count($this->slowQueries) - $this->slowQueryLimit;
+        if ($excess <= 0) {
+            return;
+        }
+
+        $this->slowQueryOverflow += $excess;
+        $this->slowQueries = array_slice($this->slowQueries, 0, $this->slowQueryLimit);
     }
 
     public function begin(

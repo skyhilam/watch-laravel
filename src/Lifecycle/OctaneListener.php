@@ -16,6 +16,7 @@ use Watch\Laravel\Http\RequestCapturer;
 use Watch\Laravel\Logging\RequestLogProcessor;
 use Watch\Laravel\Outgoing\ExecutionSourceTracker;
 use Watch\Laravel\Outgoing\OutgoingRequestCollector;
+use Watch\Laravel\Query\SlowQueryListener;
 use Watch\Laravel\Queue\JobCapturer;
 use Watch\Laravel\Queue\JobContext;
 use Watch\Laravel\Redaction\Redactor;
@@ -55,6 +56,7 @@ final class OctaneListener
         ExecutionSourceTracker::class,
         JobCapturer::class,
         JobContext::class,
+        SlowQueryListener::class,
     ];
 
     /**
@@ -100,6 +102,12 @@ final class OctaneListener
             }
         }
 
+        try {
+            FlushListener::resetExecutionState();
+        } catch (Throwable) {
+            // Resetting execution frames must never break the worker.
+        }
+
         foreach ($containers as $container) {
             try {
                 if ($container->bound(RequestContext::class)) {
@@ -107,6 +115,17 @@ final class OctaneListener
                 }
             } catch (Throwable) {
                 // Resetting state must never break the worker.
+            }
+
+            try {
+                if ($container->bound(SlowQueryListener::class)) {
+                    $listener = $container->make(SlowQueryListener::class);
+                    if (is_object($listener) && method_exists($listener, 'reset')) {
+                        $listener->reset();
+                    }
+                }
+            } catch (Throwable) {
+                // Clearing the slow-query buffer must never break the worker.
             }
         }
     }

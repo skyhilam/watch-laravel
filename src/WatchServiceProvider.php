@@ -13,6 +13,7 @@ use Watch\Laravel\Agent\CentralUrl;
 use Watch\Laravel\Agent\Runtime;
 use Watch\Laravel\Agent\StreamCentralClient;
 use Watch\Laravel\Capture\ExceptionCollector;
+use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Console\AgentCommand;
 use Watch\Laravel\Console\InstallCommand;
@@ -32,6 +33,9 @@ use Watch\Laravel\Outgoing\FailureClassifier;
 use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 use Watch\Laravel\Outgoing\OutgoingSettings;
 use Watch\Laravel\Outgoing\OutgoingUrlSanitizer;
+use Watch\Laravel\Query\CallerResolver;
+use Watch\Laravel\Query\SlowQueryListener;
+use Watch\Laravel\Query\SqlNormalizer;
 use Watch\Laravel\Queue\ExceptionFingerprint;
 use Watch\Laravel\Queue\ExceptionSnapshot;
 use Watch\Laravel\Queue\JobCapturer;
@@ -92,6 +96,9 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->singleton(TaskIdentity::class);
         $this->app->singleton(ScheduleRegistry::class);
         $this->app->singleton(ScheduledTaskCapturer::class);
+        $this->app->singleton(SqlNormalizer::class);
+        $this->app->singleton(CallerResolver::class);
+        $this->app->singleton(SlowQueryListener::class);
         $this->app->singleton(RequestCapturer::class);
         $this->app->singleton(Runtime::class, static fn (): Runtime => new Runtime());
 
@@ -122,6 +129,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerJobCollector();
         $this->registerScheduleCollector();
         $this->registerLifecycle();
+        $this->registerSlowQueryCollector();
         $this->registerE2eFixtureRoute();
     }
 
@@ -530,6 +538,51 @@ class WatchServiceProvider extends ServiceProvider
             FlushListener::register($this->app, $events);
         } catch (Throwable) {
             // Lifecycle hooks are best effort and must not break the host app.
+        }
+    }
+
+    /**
+     * Listen by the QueryExecuted class name on the event dispatcher.
+     * The database manager is not touched, so boot does not open a connection
+     * and Laravel 8 stays compatible. watch:agent does not subscribe, so the
+     * agent cannot collect its own queries and loop.
+     */
+    private function registerSlowQueryCollector(): void
+    {
+        try {
+            if (FlushListener::suppressesSlowQueries()) {
+                return;
+            }
+
+            $events = $this->app->make(Dispatcher::class);
+            $events->listen('Illuminate\Database\Events\QueryExecuted', function ($event = null): void {
+                try {
+                    if (FlushListener::suppressesSlowQueries()) {
+                        return;
+                    }
+
+                    $listener = $this->app->make(SlowQueryListener::class);
+                    if (! is_object($listener) || ! method_exists($listener, 'handle') || ! method_exists($listener, 'pull')) {
+                        return;
+                    }
+
+                    $listener->handle($event);
+                    $batch = $listener->pull();
+                    if (! is_array($batch)) {
+                        return;
+                    }
+
+                    FlushListener::absorb($this->app, $batch);
+                } catch (Throwable) {
+                    try {
+                        $this->app->make(Recorder::class)->add(Reason::TRANSPORT_ERROR);
+                    } catch (Throwable) {
+                        // A query listener must not change the statement result.
+                    }
+                }
+            });
+        } catch (Throwable) {
+            // Registering slow-query capture must not break the host app.
         }
     }
 

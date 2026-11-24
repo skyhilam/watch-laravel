@@ -162,6 +162,34 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Slow queries
+    |--------------------------------------------------------------------------
+    |
+    | 只收耗時達到門檻嘅 SQL，唔做全量 query 時間線。
+    | 預設門檻 100ms（WATCH_SLOW_QUERY_THRESHOLD_MS），每次執行最多 50 條
+    |（WATCH_SLOW_QUERY_MAX_PER_EXECUTION）。超出嘅唔送出，flush 時先報
+    | completeness，reason=query_buffer_overflow。
+    |
+    | 舊版已 publish config 冇 slow_queries 唔使重新發佈。缺 key、錯型別、
+    | 非數字、0、負數、NaN 都逐項回退下面嘅預設。0 唔代表無限，亦唔會因此
+    | 收全量 query。enabled 只接受 bool；其他型別當作未設定，維持預設開啟。
+    | 只有 bool false 先停。
+    |
+    | 正規化 SQL 用佔位符。bindings 一律唔收集，避免密碼同 PII 離開來源。
+    | max_sql_bytes 係正規化之後嘅 UTF-8 安全截斷，預設 4096，上限 65536
+    |（同協議 normalized_sql）。全路徑 fail-open。
+    |
+    */
+
+    'slow_queries' => [
+        'enabled' => true,
+        'threshold_ms' => env('WATCH_SLOW_QUERY_THRESHOLD_MS', 100),
+        'max_per_execution' => env('WATCH_SLOW_QUERY_MAX_PER_EXECUTION', 50),
+        'max_sql_bytes' => 4096,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Log buffer limit
     |--------------------------------------------------------------------------
     |

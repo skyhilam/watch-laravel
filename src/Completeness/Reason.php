@@ -17,6 +17,13 @@ final class Reason
      */
     public const OUTGOING_REQUEST_BUFFER_OVERFLOW = 'outgoing_request_buffer_overflow';
 
+    /**
+     * Reported as its own completeness event when the per-execution slow-query
+     * buffer is flushed. Not a transport drop, so it stays out of drops() and
+     * is not counted twice. docs/protocol.md and central already accept it.
+     */
+    public const QUERY_BUFFER_OVERFLOW = 'query_buffer_overflow';
+
     public const TRANSPORT_ERROR = 'transport_error';
 
     public const AGENT_UNREACHABLE = 'agent_unreachable';
@@ -52,6 +59,7 @@ final class Reason
             self::SAMPLED_OUT,
             self::LOG_BUFFER_OVERFLOW,
             self::OUTGOING_REQUEST_BUFFER_OVERFLOW,
+            self::QUERY_BUFFER_OVERFLOW,
             self::TRANSPORT_ERROR,
             self::AGENT_UNREACHABLE,
             self::CENTRAL_UNREACHABLE,
