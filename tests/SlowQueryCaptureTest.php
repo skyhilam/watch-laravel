@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Tests;
 
+use Carbon\Carbon;
 use Illuminate\Console\Events\CommandFinished;
 use Illuminate\Console\Events\CommandStarting;
 use Illuminate\Contracts\Console\Kernel as ConsoleKernel;
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Database\SQLiteConnection;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Queue\Events\JobProcessing;
@@ -91,6 +93,101 @@ final class SlowQueryCaptureTest extends TestCase
 
             return 'nested-ok';
         });
+    }
+
+    public function test_sqlite_backslash_literal_is_redacted_in_the_transported_event(): void
+    {
+        $connection = new class(new \PDO('sqlite::memory:'), ':memory:', '', ['driver' => 'sqlite', 'name' => 'privacy_test']) extends SQLiteConnection {
+            protected function getElapsedTime($start): float
+            {
+                return 120.0;
+            }
+        };
+        $connection->setEventDispatcher($this->app->make(Dispatcher::class));
+        $this->withinCommand('reports:daily', function () use ($connection): void {
+            $connection->select("SELECT 'C:\\' AS path, 'alice@example.com' AS owner");
+        });
+
+        $slow = $this->transport->ofType('slow_query');
+        $this->assertCount(1, $slow);
+        $this->assertSame('privacy_test', $slow[0]['connection']);
+        $this->assertSame('SELECT ? AS path, ? AS owner', $slow[0]['normalized_sql']);
+        $this->assertStringNotContainsString('alice@example.com', json_encode($slow, JSON_THROW_ON_ERROR));
+    }
+
+    public function test_executed_at_survives_http_buffering_until_flush(): void
+    {
+        $this->app['router']->get('/slow-clock', function () {
+            foreach (['01', '02'] as $hour) {
+                Carbon::setTestNow("2026-01-01T{$hour}:00:00Z");
+                $this->fireQuery('same_shape', 120);
+            }
+            Carbon::setTestNow('2026-01-01T09:00:00Z');
+
+            return 'ok';
+        });
+
+        try {
+            $this->get('/slow-clock')->assertOk();
+            $this->assertSame(['2026-01-01T01:00:00Z', '2026-01-01T02:00:00Z'],
+                array_column($this->transport->ofType('slow_query'), 'executed_at'));
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
+    public function test_looping_sends_worker_polls_and_keeps_the_command_frame(): void
+    {
+        $events = $this->app->make(Dispatcher::class);
+        try {
+            foreach (['queue:work', 'horizon:work'] as $command) {
+                $this->transport->events = [];
+                $this->withinCommand($command, function () use ($command, $events): void {
+                    Carbon::setTestNow('2026-01-01T01:00:00Z');
+                    $this->fireQuery('poll_one', 120);
+                    Carbon::setTestNow('2026-01-01T09:00:00Z');
+                    $this->assertSame([], $this->transport->ofType('slow_query'));
+                    $events->dispatch(FlushListener::LOOPING);
+                    $first = $this->transport->ofType('slow_query');
+                    $this->assertCount(1, $first);
+                    $this->assertSame($command, $first[0]['command_id']);
+                    $this->assertSame('2026-01-01T01:00:00Z', $first[0]['executed_at']);
+
+                    $job = new SlowQueryProbeJob('nested');
+                    $events->dispatch(new JobProcessing('sync', $job));
+                    $this->fireQuery('inside_job', 120);
+                    $events->dispatch(new JobProcessed('sync', $job));
+
+                    $this->fireQuery('poll_two', 120);
+                    $events->dispatch(FlushListener::LOOPING);
+                    $events->dispatch(FlushListener::LOOPING);
+                });
+                $this->assertSame([$command, 'nested', $command],
+                    array_column($this->transport->ofType('slow_query'), 'execution_id'));
+            }
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
+    public function test_full_execution_buffer_skips_normalization_and_backtraces(): void
+    {
+        $normalizer = $this->app->make(SqlNormalizer::class);
+        $callers = $this->app->make(CallerResolver::class);
+        $this->withinCommand('queue:work', function () use ($normalizer, $callers): void {
+            for ($i = 0; $i < 51; $i++) {
+                $this->fireQuery('poll', 120);
+            }
+            $this->assertSame(50, $normalizer->normalizations());
+            $this->assertSame(50, $callers->resolutions());
+
+            $this->app->make(Dispatcher::class)->dispatch(FlushListener::LOOPING);
+            $this->fireQuery('poll', 120);
+            $this->assertSame(50, $normalizer->normalizations());
+            $this->assertSame(50, $callers->resolutions());
+        });
+        $this->assertCount(50, $this->transport->ofType('slow_query'));
+        $this->assertSame(2, $this->app->make(Recorder::class)->count(Reason::QUERY_BUFFER_OVERFLOW));
     }
 
     public function test_provider_registers_singletons_and_listens_without_touching_the_database_manager(): void

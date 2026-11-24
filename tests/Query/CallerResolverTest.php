@@ -121,6 +121,20 @@ final class CallerResolverTest extends TestCase
         ];
     }
 
+    public function test_shared_storage_and_compiled_views_have_relative_callers(): void
+    {
+        $this->app->useStoragePath('/home/forge/site/shared/storage');
+        config(['view.compiled' => '/home/forge/site/shared/blade']);
+        $resolver = new CallerResolver('/home/forge/site/releases/current');
+
+        foreach ([
+            '/home/forge/site/shared/blade/abc.php' => 'storage/framework/views/abc.php:9',
+            '/home/forge/site/shared/storage/app/example.php' => 'storage/app/example.php:9',
+        ] as $file => $expected) {
+            $this->assertSame($expected, $resolver->locate([['file' => $file, 'line' => 9]]));
+        }
+    }
+
     public function test_resolve_uses_a_bounded_backtrace_and_returns_this_test(): void
     {
         $source = (string) file_get_contents((string) (new ReflectionClass(CallerResolver::class))->getFileName());

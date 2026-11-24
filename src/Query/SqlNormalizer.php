@@ -4,46 +4,239 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Query;
 
-/**
- * Turns one SQL string into a stable shape that is safe to leave the process.
- *
- * The only input is the SQL text. Bound parameter values are never accepted,
- * read, or spliced back in. String, number, and hex literals, plus -- and
- * block comments, become ?. IN lists of placeholders collapse to IN (?).
- * NUL bytes and invalid UTF-8 are removed. The result is cut on a UTF-8
- * boundary at max_sql_bytes, and never longer than the protocol maximum.
- */
+use Watch\Laravel\Capture\Limits;
+
+/** Produces a bounded SQL shape without consulting parameter values. */
 final class SqlNormalizer
 {
     public const DEFAULT_MAX_SQL_BYTES = 4096;
 
     public const PROTOCOL_MAX_SQL_BYTES = 65536;
 
+    public const MAX_SCAN_BYTES = 65536;
+
+    public const FAIL_CLOSED = '?';
+
     private int $normalizations = 0;
+
+    private int $scannedBytes = 0;
 
     public function normalizations(): int
     {
         return $this->normalizations;
     }
 
-    public function normalize(string $sql, int $maxBytes = self::DEFAULT_MAX_SQL_BYTES): string
+    /** Number of input bytes consumed by the most recent lexical scan. */
+    public function scannedBytes(): int
+    {
+        return $this->scannedBytes;
+    }
+
+    public function normalize(string $sql, int $maxBytes = self::DEFAULT_MAX_SQL_BYTES, string $driver = 'mysql'): string
     {
         $this->normalizations++;
+        $this->scannedBytes = 0;
+        $maxBytes = $maxBytes < 1 ? self::DEFAULT_MAX_SQL_BYTES : min($maxBytes, self::PROTOCOL_MAX_SQL_BYTES);
+        $inputClipped = strlen($sql) > self::MAX_SCAN_BYTES;
+        if ($inputClipped) {
+            // Bounds every lookahead and delimiter search, even for a single enormous literal.
+            $sql = substr($sql, 0, self::MAX_SCAN_BYTES);
+        }
+        $length = strlen($sql);
+        $mysql = $driver === 'mysql' || $driver === 'mariadb';
+        $pgsql = $driver === 'pgsql';
+        $brackets = $driver === 'sqlsrv' || $driver === 'sqlite';
+        $out = '';
+        $space = false;
+        $i = 0;
 
-        if ($maxBytes < 1) {
-            $maxBytes = self::DEFAULT_MAX_SQL_BYTES;
-        } elseif ($maxBytes > self::PROTOCOL_MAX_SQL_BYTES) {
-            $maxBytes = self::PROTOCOL_MAX_SQL_BYTES;
+        while ($i < $length && strlen($out) < $maxBytes) {
+            $start = $i;
+            $char = $sql[$i];
+            if ($char === "\0" || (ord($char) >= 0x80 && $this->validUtf8Length($sql, $length, $i) === 0)) {
+                $i++;
+
+                continue;
+            }
+            $next = $sql[$i + 1] ?? '';
+            $token = '?';
+            if ($this->isSpace($char)) {
+                $i += strspn($sql, " \t\r\n\v\f", $i);
+                $space = $out !== '';
+
+                continue;
+            }
+
+            if (($char === '-' && $next === '-') || ($mysql && $char === '#')) {
+                $i += strcspn($sql, "\r\n", $i);
+                if ($this->ambiguousLineComment($sql, $start, $i, $mysql)) {
+                    $this->scannedBytes = $i;
+
+                    return self::FAIL_CLOSED;
+                }
+            } elseif ($char === '/' && $next === '*') {
+                $i = $this->blockCommentEnd($sql, $i, $pgsql || $driver === 'sqlsrv');
+            } elseif ($char === "'" || $char === '"') {
+                $i = $this->quotedEnd($sql, $i, $char, $mysql);
+            } elseif (($char === '`' && ($mysql || $driver === 'sqlite')) || ($char === '[' && $brackets)) {
+                $i = $this->quotedEnd($sql, $i, $char === '[' ? ']' : '`', false, $char !== '[' || $driver === 'sqlsrv');
+                if ($i !== null && ! ($inputClipped && $i === $length)) {
+                    $token = substr($sql, $start, min($i - $start, $maxBytes + 1));
+                }
+            } elseif ($pgsql && $char === '$' && ($tag = $this->dollarTag($sql, $length, $i)) !== null) {
+                $end = strpos($sql, $tag, $i + strlen($tag));
+                $i = $end === false ? null : $end + strlen($tag);
+            } else {
+                if (($char === '+' || $char === '-') && $this->isUnary($out)) {
+                    $number = $i + 1 + strspn($sql, " \t\r\n\v\f", $i + 1);
+                    if ($this->isNumberAt($sql, $length, $number)) {
+                        $i = $number;
+                    }
+                }
+                if ($this->isNumberAt($sql, $length, $i)) {
+                    $i = $this->numberEnd($sql, $length, $i, $pgsql);
+                } elseif ($this->isIdentStart($sql, $i)) {
+                    $stop = min($length, $i + $maxBytes - strlen($out));
+                    $i++;
+                    while ($i < $stop && $this->isIdentContinue($sql, $i)) {
+                        $i++;
+                    }
+                    $token = substr($sql, $start, $i - $start);
+                    if ($pgsql && ($token === 'E' || $token === 'e') && ($sql[$i] ?? '') === "'") {
+                        // An explicit escape string uses a different grammar from a regular PG string.
+                        $this->scannedBytes = $i + 1;
+
+                        return self::FAIL_CLOSED;
+                    }
+                } else {
+                    $token = $char;
+                    $i++;
+                }
+            }
+
+            if ($i === null) {
+                $this->scannedBytes = $length;
+                if (! $inputClipped) {
+                    return self::FAIL_CLOSED;
+                }
+                // The closing delimiter could be past the budget. Keep only a placeholder.
+                $i = $length;
+            }
+            $out .= ($space ? ' ' : '').$token;
+            $space = false;
         }
 
-        $sql = $this->clean($sql);
-        $normalized = $this->scan($sql);
-        $collapsed = preg_replace('/\bIN\s*\(\s*\?(?:\s*,\s*\?)*\s*\)/i', 'IN (?)', $normalized);
-        if (! is_string($collapsed)) {
-            $collapsed = $normalized;
+        $this->scannedBytes = $i;
+        $truncated = $inputClipped || $i < $length || strlen($out) > $maxBytes;
+
+        return $this->finish($out, $maxBytes, $truncated);
+    }
+
+    private function finish(string $out, int $maxBytes, bool $truncated): string
+    {
+        $out = $this->clean($out);
+        $out = preg_replace('/\bIN\s*\(\s*\?(?:\s*,\s*\?)*\s*\)/i', 'IN (?)', $out) ?? $out;
+        if (! $truncated) {
+            return $out;
         }
 
-        return $this->truncate($collapsed, $maxBytes);
+        $marker = Limits::TRUNCATED;
+        if ($maxBytes < strlen($marker)) {
+            return $this->truncate($out, $maxBytes);
+        }
+
+        $prefix = $this->truncate($out, max(0, $maxBytes - strlen($marker) - 1));
+
+        return $prefix === '' ? $marker : $prefix.' '.$marker;
+    }
+
+    private function ambiguousLineComment(string $sql, int $start, int $end, bool $mysql): bool
+    {
+        // Drivers disagree about whether a bare carriage return ends a line comment.
+        if (($sql[$end] ?? '') === "\r" && ($sql[$end + 1] ?? '') !== "\n") {
+            return true;
+        }
+
+        // MySQL can parse -- without following whitespace as two minus operators.
+        // A quote or block comment on that line could extend into the following SQL.
+        $body = $start + 2;
+        return $mysql && $sql[$start] === '-' && $end > $body && ! $this->isSpace($sql[$body])
+            && strcspn($sql, "'\"`/", $body, $end - $body) < $end - $body;
+    }
+
+    private function quotedEnd(string $sql, int $i, string $close, bool $backslash, bool $doubled = true): ?int
+    {
+        $length = strlen($sql);
+        for ($i++; $i < $length; $i++) {
+            if ($backslash && $sql[$i] === '\\') {
+                $i++;
+            } elseif ($sql[$i] === $close) {
+                if (! $doubled || ($sql[$i + 1] ?? '') !== $close) {
+                    return $i + 1;
+                }
+                $i++;
+            }
+        }
+
+        return null;
+    }
+
+    private function dollarTag(string $sql, int $length, int $start): ?string
+    {
+        $i = $start + 1;
+        if ($i === $length || ! $this->isIdentStart($sql, $i)) {
+            return null;
+        }
+        while ($i < $length && $sql[$i] !== '$' && $this->isIdentContinue($sql, $i)) {
+            $i++;
+        }
+
+        return ($sql[$i] ?? '') === '$' ? substr($sql, $start, $i - $start + 1) : null;
+    }
+
+    private function numberEnd(string $sql, int $length, int $i, bool $pgsql): int
+    {
+        $digits = '0123456789';
+        $i += strspn($sql, $digits, $i);
+        if (($sql[$i] ?? '') === '.' && ($sql[$i + 1] ?? '') !== '.') {
+            $i += 1 + strspn($sql, $digits, $i + 1);
+        }
+
+        if (($sql[$i] ?? '') === 'e' || ($sql[$i] ?? '') === 'E') {
+            $exponent = $i + 1;
+            if (($sql[$exponent] ?? '') === '+' || ($sql[$exponent] ?? '') === '-') {
+                $exponent++;
+            }
+            if ($exponent < $length && $this->isDigit($sql[$exponent])) {
+                $i = $exponent + strspn($sql, $digits, $exponent);
+            }
+        }
+
+        // Mask the entire digit-led token, including binary, hex and vendor suffixes.
+        while ($i < $length && $this->isIdentContinue($sql, $i) && ! ($pgsql && $sql[$i] === '$')) {
+            $i++;
+        }
+
+        return $i;
+    }
+
+    private function blockCommentEnd(string $sql, int $i, bool $nested): ?int
+    {
+        $length = strlen($sql);
+        $depth = 1;
+        for ($i += 2; $i < $length; $i++) {
+            if ($sql[$i] === '*' && ($sql[$i + 1] ?? '') === '/') {
+                $i++;
+                if (--$depth === 0) {
+                    return $i + 1;
+                }
+            } elseif ($nested && $sql[$i] === '/' && ($sql[$i + 1] ?? '') === '*') {
+                $depth++;
+                $i++;
+            }
+        }
+
+        return null;
     }
 
     private function clean(string $sql): string
@@ -137,200 +330,6 @@ final class SqlNormalizer
         return $need;
     }
 
-    private function scan(string $sql): string
-    {
-        $length = strlen($sql);
-        $out = '';
-        $pendingSpace = false;
-        $i = 0;
-
-        while ($i < $length) {
-            $char = $sql[$i];
-
-            if ($this->isSpace($char)) {
-                if ($out !== '') {
-                    $pendingSpace = true;
-                }
-                $i++;
-
-                continue;
-            }
-
-            if ($char === '-' && ($sql[$i + 1] ?? '') === '-') {
-                $i += 2;
-                while ($i < $length && $sql[$i] !== "\n" && $sql[$i] !== "\r") {
-                    $i++;
-                }
-                $this->append($out, $pendingSpace, '?');
-
-                continue;
-            }
-
-            if ($char === '/' && ($sql[$i + 1] ?? '') === '*') {
-                $i += 2;
-                while ($i < $length) {
-                    if ($sql[$i] === '*' && ($sql[$i + 1] ?? '') === '/') {
-                        $i += 2;
-
-                        break;
-                    }
-                    $i++;
-                }
-                $this->append($out, $pendingSpace, '?');
-
-                continue;
-            }
-
-            if ($char === "'" || $char === '"') {
-                $i = $this->skipQuoted($sql, $length, $i, $char);
-                $this->append($out, $pendingSpace, '?');
-
-                continue;
-            }
-
-            if ($char === '`') {
-                $end = $this->skipWrapped($sql, $length, $i, '`', '`');
-                $this->append($out, $pendingSpace, substr($sql, $i, $end - $i));
-                $i = $end;
-
-                continue;
-            }
-
-            if ($char === '[') {
-                $end = $this->skipWrapped($sql, $length, $i, '[', ']');
-                $this->append($out, $pendingSpace, substr($sql, $i, $end - $i));
-                $i = $end;
-
-                continue;
-            }
-
-            if (($char === '+' || $char === '-') && $this->isUnary($out)) {
-                $next = $this->skipSpaces($sql, $length, $i + 1);
-                if ($this->isHexAt($sql, $length, $next) || $this->isNumberAt($sql, $length, $next)) {
-                    $end = $this->isHexAt($sql, $length, $next)
-                        ? $this->scanHex($sql, $length, $next)
-                        : $this->scanNumber($sql, $length, $next);
-                    $this->append($out, $pendingSpace, '?');
-                    $i = $end;
-
-                    continue;
-                }
-            }
-
-            if ($this->isHexAt($sql, $length, $i)) {
-                $end = $this->scanHex($sql, $length, $i);
-                $i = $this->appendLiteralOrRaw($sql, $length, $i, $end, $out, $pendingSpace);
-
-                continue;
-            }
-
-            if ($this->isNumberAt($sql, $length, $i)) {
-                $end = $this->scanNumber($sql, $length, $i);
-                $i = $this->appendLiteralOrRaw($sql, $length, $i, $end, $out, $pendingSpace);
-
-                continue;
-            }
-
-            if ($this->isIdentStart($sql, $i)) {
-                $end = $this->scanIdent($sql, $length, $i);
-                $this->append($out, $pendingSpace, substr($sql, $i, $end - $i));
-                $i = $end;
-
-                continue;
-            }
-
-            $this->append($out, $pendingSpace, $char);
-            $i++;
-        }
-
-        return $out;
-    }
-
-    /**
-     * A digit run glued to an identifier (123abc, 0x1G) stays as text.
-     * A real literal becomes ?.
-     */
-    private function appendLiteralOrRaw(string $sql, int $length, int $start, int $end, string &$out, bool &$pendingSpace): int
-    {
-        if ($end < $length && $this->isIdentContinue($sql, $end)) {
-            $end = $this->scanIdent($sql, $length, $end);
-            $this->append($out, $pendingSpace, substr($sql, $start, $end - $start));
-
-            return $end;
-        }
-
-        $this->append($out, $pendingSpace, '?');
-
-        return $end;
-    }
-
-    private function append(string &$out, bool &$pendingSpace, string $token): void
-    {
-        if ($token === '') {
-            return;
-        }
-
-        if ($pendingSpace && $out !== '') {
-            $out .= ' ';
-        }
-
-        $pendingSpace = false;
-        $out .= $token;
-    }
-
-    private function skipQuoted(string $sql, int $length, int $i, string $quote): int
-    {
-        $i++;
-
-        while ($i < $length) {
-            if ($sql[$i] === '\\' && $i + 1 < $length) {
-                $i += 2;
-
-                continue;
-            }
-
-            if ($sql[$i] === $quote) {
-                if ($i + 1 < $length && $sql[$i + 1] === $quote) {
-                    $i += 2;
-
-                    continue;
-                }
-
-                return $i + 1;
-            }
-
-            $i++;
-        }
-
-        return $i;
-    }
-
-    private function skipWrapped(string $sql, int $length, int $i, string $open, string $close): int
-    {
-        $i++;
-
-        while ($i < $length) {
-            if ($sql[$i] === $close) {
-                if ($open === $close && $i + 1 < $length && $sql[$i + 1] === $close) {
-                    $i += 2;
-
-                    continue;
-                }
-                if ($open !== $close && $i + 1 < $length && $sql[$i + 1] === $close) {
-                    $i += 2;
-
-                    continue;
-                }
-
-                return $i + 1;
-            }
-
-            $i++;
-        }
-
-        return $i;
-    }
-
     private function isUnary(string $out): bool
     {
         if ($out === '') {
@@ -349,92 +348,17 @@ final class SqlNormalizer
         return ord($last) < 0x80;
     }
 
-    private function isHexAt(string $sql, int $length, int $i): bool
-    {
-        if ($i + 2 >= $length) {
-            return false;
-        }
-
-        if ($sql[$i] !== '0' || ($sql[$i + 1] !== 'x' && $sql[$i + 1] !== 'X')) {
-            return false;
-        }
-
-        return $this->isHexDigit($sql[$i + 2]);
-    }
-
-    private function scanHex(string $sql, int $length, int $i): int
-    {
-        $i += 2;
-        while ($i < $length && $this->isHexDigit($sql[$i])) {
-            $i++;
-        }
-
-        return $i;
-    }
-
     private function isNumberAt(string $sql, int $length, int $i): bool
     {
+        if ($i >= $length) {
+            return false;
+        }
         $char = $sql[$i];
         if ($char >= '0' && $char <= '9') {
             return true;
         }
 
         return $char === '.' && $i + 1 < $length && $sql[$i + 1] >= '0' && $sql[$i + 1] <= '9';
-    }
-
-    private function scanNumber(string $sql, int $length, int $i): int
-    {
-        if ($sql[$i] === '.') {
-            $i++;
-            while ($i < $length && $this->isDigit($sql[$i])) {
-                $i++;
-            }
-
-            return $i;
-        }
-
-        while ($i < $length && $this->isDigit($sql[$i])) {
-            $i++;
-        }
-
-        if ($i < $length && $sql[$i] === '.' && ($i + 1 >= $length || $sql[$i + 1] !== '.')) {
-            $i++;
-            while ($i < $length && $this->isDigit($sql[$i])) {
-                $i++;
-            }
-        }
-
-        if ($i < $length && ($sql[$i] === 'e' || $sql[$i] === 'E')) {
-            $exponent = $i + 1;
-            if ($exponent < $length && ($sql[$exponent] === '+' || $sql[$exponent] === '-')) {
-                $exponent++;
-            }
-            if ($exponent < $length && $this->isDigit($sql[$exponent])) {
-                $i = $exponent + 1;
-                while ($i < $length && $this->isDigit($sql[$i])) {
-                    $i++;
-                }
-            }
-        }
-
-        return $i;
-    }
-
-    private function scanIdent(string $sql, int $length, int $i): int
-    {
-        $i += $this->charLength($sql, $length, $i);
-        while ($i < $length && $this->isIdentContinue($sql, $i)) {
-            $i += $this->charLength($sql, $length, $i);
-        }
-
-        return $i;
-    }
-
-    private function charLength(string $sql, int $length, int $i): int
-    {
-        $size = $this->validUtf8Length($sql, $length, $i);
-
-        return $size > 0 ? $size : 1;
     }
 
     private function isIdentStart(string $sql, int $i): bool
@@ -457,15 +381,6 @@ final class SqlNormalizer
         return $this->isIdentStart($sql, $i);
     }
 
-    private function skipSpaces(string $sql, int $length, int $i): int
-    {
-        while ($i < $length && $this->isSpace($sql[$i])) {
-            $i++;
-        }
-
-        return $i;
-    }
-
     private function isSpace(string $char): bool
     {
         return $char === ' ' || $char === "\n" || $char === "\r" || $char === "\t" || $char === "\v" || $char === "\f";
@@ -474,11 +389,6 @@ final class SqlNormalizer
     private function isDigit(string $char): bool
     {
         return $char >= '0' && $char <= '9';
-    }
-
-    private function isHexDigit(string $char): bool
-    {
-        return $this->isDigit($char) || ($char >= 'a' && $char <= 'f') || ($char >= 'A' && $char <= 'F');
     }
 
     private function truncate(string $sql, int $maxBytes): string

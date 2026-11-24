@@ -4,22 +4,20 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Query;
 
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Support\Carbon;
 use Throwable;
 use Watch\Laravel\Capture\Limits;
 use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
+use Watch\Laravel\Lifecycle\FlushListener;
 
 /**
  * Fail-open capture of queries that meet the slow-query threshold.
  *
- * The event is read by property name so illuminate/database is not required.
- * Only sql, time, and connectionName are touched. A query under the threshold
- * returns before normalization or a backtrace. Nothing here runs a database
- * query. The per-execution cap lives on this object. pull() returns the kept
- * rows and how many were dropped; that drop is query_buffer_overflow when the
- * execution is flushed, and it is not a transport drop. Call reset() when the
- * same instance outlives one execution.
+ * The dispatcher pulls this listener after each event. Check the destination
+ * request/job/command buffer as well as any locally pending rows before capture.
  */
 final class SlowQueryListener
 {
@@ -31,9 +29,13 @@ final class SlowQueryListener
 
     public const DEFAULT_MAX_SQL_BYTES = SqlNormalizer::DEFAULT_MAX_SQL_BYTES;
 
+    private ?float $thresholdMs = null;
+
+    private ?bool $enabled = null;
+
     private bool $busy = false;
 
-    /** @var list<array{normalized_sql: string, connection: string, duration_ms: float, caller: string|null}> */
+    /** @var list<array{normalized_sql: string, connection: string, duration_ms: float, executed_at: string, caller: string|null}> */
     private array $pending = [];
 
     private int $overflow = 0;
@@ -42,6 +44,7 @@ final class SlowQueryListener
         private readonly SqlNormalizer $normalizer,
         private readonly CallerResolver $callers,
         private readonly Recorder $recorder,
+        private readonly ?Container $app = null,
     ) {
     }
 
@@ -61,16 +64,23 @@ final class SlowQueryListener
 
         $this->busy = true;
         try {
-            if (! $this->enabled() || ! $this->slowEnough($event)) {
+            $duration = $this->durationMs($event);
+            if ($duration === null || $duration < $this->thresholdMs() || ! $this->enabled()) {
                 return;
             }
 
-            $captured = $this->capture($event);
-            if ($captured === null) {
+            $limit = $this->maxPerExecution();
+            $buffered = $this->app === null ? 0 : FlushListener::bufferedSlowQueryCount($this->app);
+            if ($buffered + count($this->pending) >= $limit) {
+                $this->overflow++;
+
                 return;
             }
 
-            $this->remember($captured);
+            $captured = $this->capture($event, $duration);
+            if ($captured !== null) {
+                $this->pending[] = $captured;
+            }
         } catch (Throwable) {
             try {
                 $this->recorder->add(Reason::TRANSPORT_ERROR);
@@ -84,16 +94,12 @@ final class SlowQueryListener
 
     public function enabled(): bool
     {
-        if (! $this->masterEnabled()) {
-            return false;
-        }
-
-        return Limits::enabled($this->read('watch.slow_queries.enabled'), true);
+        return $this->enabled ??= $this->masterEnabled() && Limits::enabled($this->read('watch.slow_queries.enabled'), true);
     }
 
     public function thresholdMs(): float
     {
-        return $this->finitePositive($this->read('watch.slow_queries.threshold_ms'), self::DEFAULT_THRESHOLD_MS);
+        return $this->thresholdMs ??= $this->finitePositive($this->read('watch.slow_queries.threshold_ms'), self::DEFAULT_THRESHOLD_MS);
     }
 
     public function maxPerExecution(): int
@@ -113,7 +119,7 @@ final class SlowQueryListener
      * Kept queries, then how many were dropped for this execution.
      * Both counters are cleared.
      *
-     * @return array{queries: list<array{normalized_sql: string, connection: string, duration_ms: float, caller: string|null}>, overflow: int}
+     * @return array{queries: list<array{normalized_sql: string, connection: string, duration_ms: float, executed_at: string, caller: string|null}>, overflow: int}
      */
     public function pull(): array
     {
@@ -133,27 +139,19 @@ final class SlowQueryListener
         $this->overflow = 0;
     }
 
-    private function slowEnough(mixed $event): bool
-    {
-        $time = $this->durationMs($event);
-        if ($time === null) {
-            return false;
-        }
-
-        return $time >= $this->thresholdMs();
-    }
-
     /**
-     * @return array{normalized_sql: string, connection: string, duration_ms: float, caller: string|null}|null
+     * @return array{normalized_sql: string, connection: string, duration_ms: float, executed_at: string, caller: string|null}|null
      */
-    private function capture(mixed $event): ?array
+    private function capture(mixed $event, float $duration): ?array
     {
+        $executedAt = Carbon::now('UTC')->format('Y-m-d\TH:i:s\Z');
         $sql = $this->sqlOf($event);
         if ($sql === null) {
             return null;
         }
 
-        $normalized = $this->normalizer->normalize($sql, $this->maxSqlBytes());
+        $driver = ($event->connection ?? null)?->getDriverName() ?? '';
+        $normalized = $this->normalizer->normalize($sql, $this->maxSqlBytes(), $driver);
         if ($normalized === '') {
             return null;
         }
@@ -163,31 +161,13 @@ final class SlowQueryListener
             return null;
         }
 
-        $duration = $this->durationMs($event);
-        if ($duration === null) {
-            return null;
-        }
-
         return [
+            'executed_at' => $executedAt,
             'normalized_sql' => $normalized,
             'connection' => $connection,
             'duration_ms' => $duration,
             'caller' => $this->callers->resolve(),
         ];
-    }
-
-    /**
-     * @param array{normalized_sql: string, connection: string, duration_ms: float, caller: string|null} $query
-     */
-    private function remember(array $query): void
-    {
-        if (count($this->pending) >= $this->maxPerExecution()) {
-            $this->overflow++;
-
-            return;
-        }
-
-        $this->pending[] = $query;
     }
 
     private function durationMs(mixed $event): ?float

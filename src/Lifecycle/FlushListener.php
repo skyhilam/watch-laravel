@@ -102,6 +102,19 @@ final class FlushListener
         return self::$agentDepth > 0 || self::argvIsWatchAgent();
     }
 
+    /** Includes worker command rows already emitted at an earlier Looping event. */
+    public static function bufferedSlowQueryCount(Container $app): int
+    {
+        $context = RequestContext::current($app);
+        if ($context->isActive()) {
+            return $context->bufferedSlowQueryCount();
+        }
+
+        $bucket = self::$executions === [] ? self::$unscoped : self::$executions[array_key_last(self::$executions)];
+
+        return count($bucket['queries']) + ($bucket['emitted'] ?? 0);
+    }
+
     /**
      * Move one captured batch onto the active HTTP request, or the innermost
      * job/command frame. The listener has already been pulled, so the cap
@@ -188,9 +201,12 @@ final class FlushListener
         }
 
         foreach ([self::LOOPING, self::WORKER_STOPPING] as $name) {
-            $events->listen($name, static function ($event = null) use ($app): void {
+            $events->listen($name, static function ($event = null) use ($app, $name): void {
                 try {
                     self::finishOpenJobs($app);
+                    if ($name === self::LOOPING) {
+                        self::flushWorkerPolls($app);
+                    }
                 } catch (Throwable) {
                     // A worker boundary must not leak or throw.
                 }
@@ -276,6 +292,29 @@ final class FlushListener
             }
             self::finishAt($app, $index);
         }
+    }
+
+    private static function flushWorkerPolls(Container $app): void
+    {
+        $index = array_key_last(self::$executions);
+        if ($index === null) {
+            return;
+        }
+
+        $frame = self::$executions[$index];
+        if ($frame['kind'] !== 'command' || ! in_array($frame['name'], ['queue:work', 'horizon:work'], true)) {
+            return;
+        }
+
+        if (($frame['queries'] === [] && $frame['overflow'] === 0) || self::suppressesSlowQueries() || self::httpActive($app)) {
+            return;
+        }
+
+        // Keep the command open and preserve its lifetime cap across worker iterations.
+        self::$executions[$index]['emitted'] = ($frame['emitted'] ?? 0) + count($frame['queries']);
+        self::$executions[$index]['queries'] = [];
+        self::$executions[$index]['overflow'] = 0;
+        self::emit($app, $frame);
     }
 
     private static function beginCommand(Container $app, mixed $event): void
@@ -520,6 +559,7 @@ final class FlushListener
             'connection' => $query['connection'] ?? null,
             'duration_ms' => $query['duration_ms'] ?? null,
             'caller' => $query['caller'] ?? null,
+            'executed_at' => $query['executed_at'] ?? null,
         ];
 
         $kind = $frame['kind'] ?? null;
@@ -560,7 +600,7 @@ final class FlushListener
             return;
         }
 
-        $bucket['limit'] = max(0, $limit);
+        $bucket['limit'] = max(0, $limit - ($bucket['emitted'] ?? 0));
         $queries = $bucket['queries'] ?? [];
         if (! is_array($queries)) {
             $queries = [];
@@ -583,7 +623,7 @@ final class FlushListener
 
     /**
      * @param array<string, mixed> $query
-     * @return array{normalized_sql: string, connection: string, duration_ms: float, caller: string|null}|null
+     * @return array{normalized_sql: string, connection: string, duration_ms: float, executed_at: string|null, caller: string|null}|null
      */
     private static function safeQuery(array $query): ?array
     {
@@ -613,6 +653,7 @@ final class FlushListener
             'connection' => $connection,
             'duration_ms' => $duration,
             'caller' => $caller,
+            'executed_at' => is_string($query['executed_at'] ?? null) ? $query['executed_at'] : null,
         ];
     }
 

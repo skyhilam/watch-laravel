@@ -74,6 +74,11 @@ final class RequestContext
      */
     private array $slowQueries = [];
 
+    /** @var list<array<string, mixed>> Last batch pulled for HTTP envelope assembly. */
+    private array $pulledSlowQueries = [];
+
+    private int $pulledQueryIndex = 0;
+
     private int $slowQueryLimit = self::DEFAULT_SLOW_QUERY_LIMIT;
 
     private int $slowQueryOverflow = 0;
@@ -125,6 +130,8 @@ final class RequestContext
         $this->slowQueries = [];
         $this->slowQueryOverflow = 0;
         $this->slowQueryLimit = self::DEFAULT_SLOW_QUERY_LIMIT;
+        $this->pulledSlowQueries = [];
+        $this->pulledQueryIndex = 0;
     }
 
     public function rememberException(\Throwable $throwable, bool $handled, string $occurredAt): void
@@ -279,6 +286,11 @@ final class RequestContext
         $this->slowQueries[] = $entry;
     }
 
+    public function bufferedSlowQueryCount(): int
+    {
+        return count($this->slowQueries);
+    }
+
     public function addSlowQueryOverflow(int $count): void
     {
         if ($count > 0) {
@@ -297,10 +309,34 @@ final class RequestContext
     public function pullSlowQueries(): array
     {
         $items = $this->slowQueries;
+        $this->pulledSlowQueries = $items;
+        $this->pulledQueryIndex = 0;
         $this->slowQueries = [];
         $this->slowQueryOverflow = 0;
 
         return $items;
+    }
+
+    /**
+     * RequestCapturer forwards four fields from the pulled rows in order.
+     * Match that projection so identical queries retain their individual times.
+     *
+     * @param array<string, mixed> $fields
+     */
+    public function pulledQueryExecutedAt(array $fields): ?string
+    {
+        $row = $this->pulledSlowQueries[$this->pulledQueryIndex] ?? null;
+        if ($row === null) {
+            return null;
+        }
+        foreach (['normalized_sql', 'connection', 'duration_ms', 'caller'] as $key) {
+            if (($row[$key] ?? null) !== ($fields[$key] ?? null)) {
+                return null;
+            }
+        }
+        $this->pulledQueryIndex++;
+
+        return is_string($row['executed_at'] ?? null) ? $row['executed_at'] : null;
     }
 
     public function setSlowQueryLimit(int $limit): void

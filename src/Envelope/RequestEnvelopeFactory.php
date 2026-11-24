@@ -120,6 +120,12 @@ final class RequestEnvelopeFactory
             }
         }
 
+        $executedAt = $fields['executed_at'] ?? null;
+        if ($context->isActive() && ($fields['execution_type'] ?? null) === 'request') {
+            $capturedAt = $context->pulledQueryExecutedAt($fields);
+            $executedAt ??= $capturedAt;
+        }
+
         $sql = $fields['normalized_sql'] ?? null;
         $connection = $fields['connection'] ?? null;
         $duration = $fields['duration_ms'] ?? null;
@@ -147,7 +153,7 @@ final class RequestEnvelopeFactory
             'sql_hash' => hash('sha256', $sql),
             'connection' => $connection,
             'duration_ms' => $durationMs,
-            'executed_at' => $this->executedAt($fields['executed_at'] ?? null),
+            'executed_at' => $this->executedAt($executedAt),
         ];
 
         if ($context->isActive()) {

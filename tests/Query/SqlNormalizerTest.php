@@ -62,7 +62,7 @@ SQL,
 
         yield 'unclosed string still hides the text' => [
             "select 'hunter2",
-            'select ?',
+            SqlNormalizer::FAIL_CLOSED,
             ['hunter2'],
         ];
 
@@ -134,7 +134,7 @@ SQL,
 
         yield 'unclosed block comment' => [
             'select 1 /* hunter2',
-            'select ? ?',
+            SqlNormalizer::FAIL_CLOSED,
             ['hunter2'],
         ];
 
@@ -161,6 +161,120 @@ SQL,
         ];
     }
 
+    /** @dataProvider dialectStatements */
+    #[DataProvider('dialectStatements')]
+    public function test_dialect_literals_never_leave_the_normalizer(string $driver, string $sql, string $expected): void
+    {
+        $actual = (new SqlNormalizer())->normalize($sql, 4096, $driver);
+        $this->assertSame($expected, $actual);
+        foreach (['alice@example.com', '5550100', 'text', "'x'", '1011', '75'] as $secret) {
+            $this->assertStringNotContainsString($secret, $actual);
+        }
+    }
+
+    public static function dialectStatements(): iterable
+    {
+        foreach (['mysql', 'mariadb'] as $driver) {
+            yield "$driver hash comment" => [$driver,
+                "SELECT * FROM users # don't use the index\nWHERE email = 'alice@example.com' AND phone = '5550100'",
+                'SELECT * FROM users ? WHERE email = ? AND phone = ?',
+            ];
+        }
+        foreach (['sqlite', 'pgsql', 'sqlsrv'] as $driver) {
+            yield "$driver trailing backslash" => [$driver,
+                "SELECT * FROM files WHERE path = 'C:\\' OR owner = 'alice@example.com'",
+                'SELECT * FROM files WHERE path = ? OR owner = ?',
+            ];
+        }
+        yield 'untagged dollar quote' => ['pgsql', 'SELECT $$text$$, $1', 'SELECT ?, $1'];
+        yield 'tagged dollar quote' => ['pgsql', 'SELECT $tag_2$text$tag_2$', 'SELECT ?'];
+        yield 'quoted array element' => ['pgsql', "SELECT ARRAY['x']", 'SELECT ARRAY[?]'];
+        yield 'nested array' => ['pgsql', "SELECT ARRAY[ARRAY[1,2]] AND email = 'alice@example.com'", 'SELECT ARRAY[ARRAY[?,?]] AND email = ?'];
+        yield 'nested block comment' => ['pgsql', "SELECT /* outer /* inner */ don't expose text */ 'alice@example.com'", 'SELECT ? ?'];
+        yield 'numeric tokens' => ['mysql', 'SELECT 0b1011, .75e2, .75e-2, 0x1F, 1e5, 123text', 'SELECT ?, ?, ?, ?, ?, ?'];
+        yield 'explicit postgres escape string with a comment-looking suffix' => [
+            'pgsql', "SELECT E'can\\'t reveal text --' AS msg", '?',
+        ];
+        yield 'mysql double minus before multiline literal' => [
+            'mysql', "SELECT 1--2, 'first line\ntext --' AS msg", '?',
+        ];
+        yield 'postgres hash operator' => ['pgsql', "SELECT doc #>> ARRAY['x']", 'SELECT doc #>> ARRAY[?]'];
+        yield 'sqlsrv bracket escape' => ['sqlsrv', "SELECT [column]]name], 'text'", 'SELECT [column]]name], ?'];
+    }
+
+    /** @dataProvider incompleteStatements */
+    #[DataProvider('incompleteStatements')]
+    public function test_unterminated_tokens_discard_the_whole_statement(string $driver, string $tail): void
+    {
+        $this->assertSame('?', (new SqlNormalizer())->normalize('SELECT private_column '.$tail, 4096, $driver));
+    }
+
+    public static function incompleteStatements(): iterable
+    {
+        yield 'single quote' => ['mysql', "'text"];
+        yield 'double quote' => ['sqlite', '"text'];
+        yield 'backtick' => ['mysql', '`text'];
+        yield 'bracket' => ['sqlsrv', '[text'];
+        yield 'dollar' => ['pgsql', '$$text'];
+        yield 'tag mismatch' => ['pgsql', '$tag$text$TAG$'];
+        yield 'block comment' => ['sqlite', '/* text'];
+        yield 'nested block comment' => ['pgsql', '/* text /* text */'];
+    }
+
+    public function test_scan_stops_at_input_and_output_budgets(): void
+    {
+        $normalizer = new SqlNormalizer();
+        foreach ([1024 * 1024, 32 * 1024 * 1024] as $size) {
+            $actual = $normalizer->normalize("SELECT '".str_repeat('x', $size)."'");
+            $this->assertSame('SELECT ? [truncated]', $actual);
+            $this->assertLessThanOrEqual(SqlNormalizer::MAX_SCAN_BYTES, $normalizer->scannedBytes());
+        }
+
+        $actual = $normalizer->normalize(str_repeat('SELECT a, ', 10000), 64);
+        $this->assertLessThanOrEqual(64, strlen($actual));
+        $this->assertStringEndsWith('[truncated]', $actual);
+        $this->assertLessThan(100, $normalizer->scannedBytes());
+
+        // Never emit the raw prefix of an identifier that did not close in-budget.
+        $actual = $normalizer->normalize('SELECT ['.str_repeat('private', 100000), 4096, 'sqlsrv');
+        $this->assertStringNotContainsString('private', $actual);
+        $this->assertStringEndsWith('[truncated]', $actual);
+    }
+
+    public function test_disabled_listener_reads_each_setting_once_and_skips_capture(): void
+    {
+        $original = $this->app['config'];
+        $config = new class($original->all()) extends \Illuminate\Config\Repository {
+            public array $reads = [];
+
+            public function get($key, $default = null)
+            {
+                $this->reads[$key] = ($this->reads[$key] ?? 0) + 1;
+
+                return parent::get($key, $default);
+            }
+        };
+        $config->set('watch.slow_queries.enabled', false);
+        $this->app->instance('config', $config);
+        try {
+            $normalizer = new SqlNormalizer();
+            $callers = new CallerResolver();
+            $listener = new SlowQueryListener($normalizer, $callers, new Recorder());
+            $listener->handle((object) ['time' => 10]);
+            $this->assertArrayNotHasKey('watch.slow_queries.enabled', $config->reads);
+            foreach ([100, 200, 300] as $ms) {
+                $listener->handle((object) ['sql' => 'select 1', 'time' => $ms, 'connectionName' => 'mysql']);
+            }
+            foreach (['watch.enabled', 'watch.slow_queries.enabled', 'watch.slow_queries.threshold_ms'] as $key) {
+                $this->assertSame(1, $config->reads[$key] ?? 0, $key);
+            }
+            $this->assertSame(0, $normalizer->normalizations());
+            $this->assertSame(0, $callers->resolutions());
+        } finally {
+            $this->app->instance('config', $original);
+        }
+    }
+
     public function test_regression_normalizer_never_reads_bindings_or_keeps_literal_secrets(): void
     {
         $source = (string) file_get_contents((string) (new ReflectionClass(SqlNormalizer::class))->getFileName());
@@ -168,10 +282,12 @@ SQL,
 
         $method = new ReflectionMethod(SqlNormalizer::class, 'normalize');
         $parameters = $method->getParameters();
-        $this->assertCount(2, $parameters);
+        $this->assertCount(3, $parameters);
         $this->assertSame('sql', $parameters[0]->getName());
         $this->assertSame('string', (string) $parameters[0]->getType());
         $this->assertSame('maxBytes', $parameters[1]->getName());
+        $this->assertSame('driver', $parameters[2]->getName());
+        $this->assertSame('string', (string) $parameters[2]->getType());
 
         $secret = 'unique-literal-secret-xyz';
         $normalized = (new SqlNormalizer())->normalize("select * from users where token = '".$secret."' and id in (1, 2)");
@@ -252,6 +368,7 @@ SQL,
                 'watch.slow_queries.max_per_execution' => 0,
                 'watch.slow_queries.max_sql_bytes' => -5,
             ]);
+            $listener = $this->listener();
             $this->assertTrue($listener->enabled(), 'only a bool disables slow queries');
             $this->assertSame(100.0, $listener->thresholdMs());
             $this->assertSame(50, $listener->maxPerExecution());
@@ -263,6 +380,7 @@ SQL,
                 'watch.slow_queries.max_per_execution' => '10',
                 'watch.slow_queries.max_sql_bytes' => '128',
             ]);
+            $listener = $this->listener();
             $this->assertFalse($listener->enabled());
             $this->assertSame(250.0, $listener->thresholdMs());
             $this->assertSame(10, $listener->maxPerExecution());
@@ -272,6 +390,7 @@ SQL,
                 'watch.enabled' => false,
                 'watch.slow_queries.enabled' => true,
             ]);
+            $listener = $this->listener();
             $this->assertFalse($listener->enabled());
         } finally {
             config(['watch' => $original]);

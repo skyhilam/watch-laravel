@@ -167,6 +167,25 @@ final class CallerResolver
             return ltrim(substr($path, strlen($base)), '/');
         }
 
+        $roots = [
+            'storage/framework/views' => function_exists('config') ? config('view.compiled') : null,
+            'storage' => function_exists('storage_path') ? storage_path() : null,
+        ];
+        foreach ($roots as $label => $root) {
+            if (! is_string($root) || $root === '') {
+                continue;
+            }
+            // A release-local symlink and the real shared directory identify the same root.
+            foreach ([$root, realpath($root)] as $candidate) {
+                if (is_string($candidate)) {
+                    $prefix = $this->normalize($candidate).'/';
+                    if (str_starts_with($path, $prefix)) {
+                        return $label.'/'.substr($path, strlen($prefix));
+                    }
+                }
+            }
+        }
+
         return $path;
     }
 
