@@ -38,5 +38,17 @@ Route::get('/watch-e2e-exception', function () {
     return response('watch-e2e-exception-ok', 200);
 })->name('watch.e2e.exception');
 
+/*
+ * Outgoing calls for scripts/e2e.sh. The probe is WatchServiceProvider::
+ * respondToE2eOutgoingFixture(), also used by the Laravel 8 fallback, so the
+ * two registrations cannot drift. It calls WATCH_E2E_OUTGOING_URL (200 and
+ * 500) and WATCH_E2E_OUTGOING_CLOSED_URL (connection refused). The query is
+ * api_key=E2E_OUTGOING_PLAINTEXT_SECRET. Exceptions are swallowed. The URL
+ * must be a separate loopback process: this server is single-threaded.
+ */
+Route::get('/watch-e2e-outgoing', function () {
+    return \Watch\Laravel\WatchServiceProvider::respondToE2eOutgoingFixture();
+})->name('watch.e2e.outgoing');
+
 $router = app('router');
 require __DIR__.'/request-detail.php';

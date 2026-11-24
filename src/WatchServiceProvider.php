@@ -515,7 +515,8 @@ class WatchServiceProvider extends ServiceProvider
      * discovered and the e2e routes are 404. Register each missing fixture
      * when the application is outside production. A host that never sets
      * WATCH_E2E_FIXTURE does not get these routes. Keep the closures in sync
-     * with workbench/routes/web.php.
+     * with workbench/routes/web.php. The outgoing probe is
+     * respondToE2eOutgoingFixture() so Laravel 8 and 13 share one body.
      */
     private function registerE2eFixtureRoute(): void
     {
@@ -554,7 +555,123 @@ class WatchServiceProvider extends ServiceProvider
                     return response('watch-e2e-exception-ok', 200);
                 })->middleware('web')->name('watch.e2e.exception');
             }
+
+            if (! $router->has('watch.e2e.outgoing')) {
+                $router->get('/watch-e2e-outgoing', static function () {
+                    return \Watch\Laravel\WatchServiceProvider::respondToE2eOutgoingFixture();
+                })->middleware('web')->name('watch.e2e.outgoing');
+            }
         });
+    }
+
+    /**
+     * E2E only. GET /watch-e2e-outgoing calls the loopback stub named by
+     * WATCH_E2E_OUTGOING_URL (200 and 500) and the closed port named by
+     * WATCH_E2E_OUTGOING_CLOSED_URL. The query carries
+     * api_key=E2E_OUTGOING_PLAINTEXT_SECRET. Client exceptions are swallowed.
+     * A URL that is not loopback, or that points at this single-threaded
+     * server, is skipped so the fixture cannot deadlock on itself.
+     * A missing Http facade or Guzzle driver is a 500 with a fixed marker.
+     * That absence is not a probe failure and must not be swallowed as 200.
+     *
+     * @return \Illuminate\Http\Response|\Symfony\Component\HttpFoundation\Response
+     */
+    public static function respondToE2eOutgoingFixture()
+    {
+        if (! class_exists(\Illuminate\Support\Facades\Http::class) || ! class_exists(\GuzzleHttp\Client::class)) {
+            return response('watch-e2e-outgoing-missing-http-client', 500);
+        }
+
+        try {
+            $secret = 'E2E_OUTGOING_PLAINTEXT_SECRET';
+            $targets = [
+                self::e2eLoopbackUrl(self::e2eEnv('WATCH_E2E_OUTGOING_URL'), '/ok', $secret),
+                self::e2eLoopbackUrl(self::e2eEnv('WATCH_E2E_OUTGOING_URL'), '/error', $secret),
+                self::e2eLoopbackUrl(self::e2eEnv('WATCH_E2E_OUTGOING_CLOSED_URL'), '', $secret),
+            ];
+            if (class_exists(\Illuminate\Support\Facades\Http::class)) {
+                foreach ($targets as $url) {
+                    if (! is_string($url) || $url === '') {
+                        continue;
+                    }
+                    try {
+                        \Illuminate\Support\Facades\Http::withOptions([
+                            'timeout' => 2,
+                            'connect_timeout' => 1,
+                        ])->get($url);
+                    } catch (\Throwable) {
+                        // ConnectionFailed is captured separately. The response stays 200.
+                    }
+                }
+            }
+        } catch (\Throwable) {
+            // The fixture must not turn a probe failure into a 500.
+        }
+
+        return response('watch-e2e-outgoing-ok', 200);
+    }
+
+    private static function e2eEnv(string $key): string
+    {
+        try {
+            $value = $_ENV[$key] ?? $_SERVER[$key] ?? false;
+            if ($value === false || $value === null || $value === '') {
+                $fromEnv = getenv($key);
+                $value = $fromEnv === false ? env($key) : $fromEnv;
+            }
+        } catch (\Throwable) {
+            return '';
+        }
+
+        return is_string($value) ? trim($value) : '';
+    }
+
+    /**
+     * Build a loopback probe URL, or null when the target could deadlock or leave the machine.
+     */
+    private static function e2eLoopbackUrl(string $base, string $suffix, string $secret): ?string
+    {
+        $base = trim($base);
+        if ($base === '' || $secret === '') {
+            return null;
+        }
+
+        $parts = parse_url($base);
+        if (! is_array($parts)) {
+            return null;
+        }
+
+        $scheme = isset($parts['scheme']) && is_string($parts['scheme']) ? strtolower($parts['scheme']) : '';
+        $host = isset($parts['host']) && is_string($parts['host']) ? strtolower($parts['host']) : '';
+        if (($scheme !== 'http' && $scheme !== 'https') || ! in_array($host, ['127.0.0.1', 'localhost', '::1'], true)) {
+            return null;
+        }
+
+        $port = isset($parts['port']) ? (int) $parts['port'] : ($scheme === 'https' ? 443 : 80);
+        if ($port < 1 || $port > 65535) {
+            return null;
+        }
+
+        $serverPort = (int) ($_SERVER['SERVER_PORT'] ?? 0);
+        if ($serverPort > 0 && $port === $serverPort) {
+            return null;
+        }
+
+        $path = isset($parts['path']) && is_string($parts['path']) ? $parts['path'] : '';
+        if ($suffix !== '') {
+            $path = rtrim($path, '/').'/'.ltrim($suffix, '/');
+        }
+        if ($path === '' || $path[0] !== '/') {
+            $path = '/'.ltrim($path, '/');
+        }
+
+        $origin = $scheme.'://'.$host;
+        $defaultPort = $scheme === 'https' ? 443 : 80;
+        if ($port !== $defaultPort) {
+            $origin .= ':'.$port;
+        }
+
+        return $origin.$path.'?api_key='.rawurlencode($secret);
     }
 
     private function e2eFixtureEnabled(): bool
