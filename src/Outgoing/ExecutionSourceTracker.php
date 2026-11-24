@@ -29,6 +29,12 @@ final class ExecutionSourceTracker
 
     public const JOB_FAILED = 'Illuminate\Queue\Events\JobFailed';
 
+    public const JOB_RELEASED_AFTER_EXCEPTION = 'Illuminate\Queue\Events\JobReleasedAfterException';
+
+    public const LOOPING = 'Illuminate\Queue\Events\Looping';
+
+    public const WORKER_STOPPING = 'Illuminate\Queue\Events\WorkerStopping';
+
     public const COMMAND_STARTING = 'Illuminate\Console\Events\CommandStarting';
 
     public const COMMAND_FINISHED = 'Illuminate\Console\Events\CommandFinished';
@@ -50,10 +56,23 @@ final class ExecutionSourceTracker
             });
         });
 
-        foreach ([self::JOB_PROCESSED, self::JOB_FAILED] as $event) {
+        foreach ([self::JOB_PROCESSED, self::JOB_FAILED, self::JOB_RELEASED_AFTER_EXCEPTION] as $event) {
             $events->listen($event, function ($payload = null): void {
                 $this->guard(function (): void {
                     $this->finish('job');
+                });
+            });
+        }
+
+        // A released job is one frame. A worker loop or stop can follow a
+        // missing JobProcessed, including on Laravel 8, so drop every frame
+        // from the first job inward before flushing. Clearing first keeps the
+        // stack honest when the collector throws.
+        foreach ([self::LOOPING, self::WORKER_STOPPING] as $event) {
+            $events->listen($event, function ($payload = null): void {
+                $this->guard(function (): void {
+                    $this->clearOpenJobs();
+                    $this->collector()->flushIfIdle();
                 });
             });
         }
@@ -122,6 +141,21 @@ final class ExecutionSourceTracker
         for ($index = count($this->stack) - 1; $index >= 0; $index--) {
             if ($this->stack[$index]['source_type'] === $type) {
                 array_splice($this->stack, $index, 1);
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * Remove the oldest job and everything above it. An outer command such as
+     * queue:work stays; a sub-command started inside the job does not.
+     */
+    private function clearOpenJobs(): void
+    {
+        foreach ($this->stack as $index => $frame) {
+            if ($frame['source_type'] === 'job') {
+                array_splice($this->stack, $index);
 
                 return;
             }
