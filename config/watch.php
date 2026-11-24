@@ -103,6 +103,16 @@ return [
         'max_payload_bytes' => 16384, // 遮罩後 payload／query 各自 JSON 上限。亦適用於每筆 log context。
         'max_header_bytes' => 1024, // 每個 header 合併後嘅值。
         'max_envelope_bytes' => 65536, // 編碼後 request；依次丟 payload/query/headers。
+        /*
+         * Queue job 收集。預設開啟，但唔假設有 queue worker：冇 worker、又冇
+         * sync 執行，就唔會有 job 事件，讀取方要顯示「未啟用／冇數據」，唔好
+         * 當成 0 個失敗。舊版已 publish config 冇 capture.jobs 唔使重新發佈；
+         * 缺 key、jobs 唔係 array、或者 enabled 唔係 bool，都回退開啟。
+         * 只有 bool false 先停。全路徑 fail-open。
+         */
+        'jobs' => [
+            'enabled' => true,
+        ],
     ],
 
     /*
@@ -110,7 +120,8 @@ return [
     | Collectors
     |--------------------------------------------------------------------------
     |
-    | 每個 collector 一個 sibling key，之後可以加 query／job 等而不改 request capture。
+    | 每個 collector 一個 sibling key，之後可以加 query 等而不改 request capture。
+    | Queue job 收集喺 capture.jobs，唔係呢度。
     | 舊版已發佈 config 冇 collectors，或者缺少某個 sibling key 時，
     | exception 同 outgoing_request 都預設開啟。
     | 程式逐項用 Limits::enabled／Limits::positive 讀取：缺 key、錯型別或非正整數

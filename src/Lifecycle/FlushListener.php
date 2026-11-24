@@ -14,8 +14,10 @@ use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 
 /**
  * Flush pending transport state when a console command finishes, a queue job
- * ends (processed or failed), or the application terminates. No Horizon and no
- * queue worker is assumed; these only fire when the host app has them.
+ * ends (processed, failed, released after an exception, or the worker stops),
+ * or the application terminates. No Horizon and no queue worker is assumed;
+ * these only fire when the host app has them. JobReleasedAfterException is a
+ * Laravel 9+ class name listened to as a string, so Laravel 8 does not fatal.
  */
 final class FlushListener
 {
@@ -23,6 +25,8 @@ final class FlushListener
         'Illuminate\Console\Events\CommandFinished',
         'Illuminate\Queue\Events\JobProcessed',
         'Illuminate\Queue\Events\JobFailed',
+        'Illuminate\Queue\Events\JobReleasedAfterException',
+        'Illuminate\Queue\Events\WorkerStopping',
     ];
 
     public static function register(Container $app, Dispatcher $events): void

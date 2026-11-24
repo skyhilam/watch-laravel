@@ -8,6 +8,7 @@ use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Watch\Laravel\Tests\Outgoing\FakeHttpEvents;
+use Watch\Laravel\Tests\Queue\ProbeJob;
 use Watch\Laravel\Agent\Agent;
 use Watch\Laravel\Agent\Backoff;
 use Watch\Laravel\Agent\CentralResponse;
@@ -70,6 +71,12 @@ final class AgentEndToEndTest extends TestCase
             }
 
             return 'outgoing-ok';
+        });
+
+        $router->get('/queue-job', function () {
+            ProbeJob::dispatch('ok', 'E2E_JOB_PLAINTEXT_SECRET');
+
+            return 'job-ok';
         });
     }
 
@@ -174,6 +181,90 @@ final class AgentEndToEndTest extends TestCase
         $this->assertSame(1, $result['quota_exceeded']);
         $this->assertSame(0, $result['invalid']);
         $this->assertSame(1, $this->agentRecorder->count(Reason::QUOTA_EXCEEDED));
+    }
+
+    public function test_a_sync_job_reaches_the_agent_and_is_drained(): void
+    {
+        $this->listener->start();
+
+        $response = $this->get('/queue-job');
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame('job-ok', $response->getContent());
+
+        $payloads = $this->listener->accept(500);
+        if ($this->eventsOfPayloads($payloads, 'job') === []) {
+            $payloads = array_merge($payloads, $this->listener->accept(500));
+        }
+
+        $events = $this->eventsOfPayloads($payloads, null);
+        $jobs = array_values(array_filter(
+            $events,
+            static fn (array $event): bool => ($event['type'] ?? null) === 'job',
+        ));
+        $requests = array_values(array_filter(
+            $events,
+            static fn (array $event): bool => ($event['type'] ?? null) === 'request',
+        ));
+        $this->assertCount(1, $jobs);
+        $this->assertCount(1, $requests);
+        $this->assertSame(ProbeJob::class, $jobs[0]['job_class']);
+        $this->assertSame('processed', $jobs[0]['status']);
+        $this->assertSame('sync', $jobs[0]['driver']);
+        $this->assertNull($jobs[0]['queue_wait_ms']);
+        $this->assertSame($requests[0]['request_id'], $jobs[0]['request_id']);
+        $this->assertStringNotContainsString('E2E_JOB_PLAINTEXT_SECRET', json_encode($jobs[0], JSON_THROW_ON_ERROR));
+
+        $encoded = implode("\n", array_map(
+            static fn (array $event): string => json_encode($event, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            $events,
+        ));
+        $result = $this->receiver(1000)->ingest($encoded, 'key-a');
+        $this->assertGreaterThanOrEqual(1, $result['accepted']);
+        $this->assertSame(0, $result['invalid']);
+
+        $client = new FakeCentralClient();
+        $drainer = $this->drainer($client);
+        $sent = 0;
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $drained = $drainer->drainOnce();
+            $sent += (int) ($drained['sent'] ?? 0);
+            if ($this->spoolFiles() === []) {
+                break;
+            }
+        }
+
+        $this->assertGreaterThanOrEqual(1, $sent);
+        $drainedJobs = [];
+        foreach (array_keys($client->posts) as $index) {
+            foreach ($client->eventsOfPost((int) $index, 'job') as $event) {
+                $drainedJobs[] = $event;
+            }
+        }
+        $this->assertCount(1, $drainedJobs);
+        $this->assertSame($requests[0]['request_id'], $drainedJobs[0]['request_id']);
+        $this->assertSame('processed', $drainedJobs[0]['status']);
+    }
+
+    /**
+     * @param list<string> $payloads
+     * @return list<array<string, mixed>>
+     */
+    private function eventsOfPayloads(array $payloads, ?string $type): array
+    {
+        $events = [];
+        foreach ($payloads as $payload) {
+            foreach (explode("\n", trim($payload)) as $line) {
+                if ($line === '') {
+                    continue;
+                }
+                $decoded = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                if (is_array($decoded) && ($type === null || ($decoded['type'] ?? null) === $type)) {
+                    $events[] = $decoded;
+                }
+            }
+        }
+
+        return $events;
     }
 
     public function test_quota_exceeded_drops_new_events_but_business_stays_200(): void

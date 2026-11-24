@@ -32,6 +32,11 @@ use Watch\Laravel\Outgoing\FailureClassifier;
 use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 use Watch\Laravel\Outgoing\OutgoingSettings;
 use Watch\Laravel\Outgoing\OutgoingUrlSanitizer;
+use Watch\Laravel\Queue\ExceptionFingerprint;
+use Watch\Laravel\Queue\ExceptionSnapshot;
+use Watch\Laravel\Queue\JobCapturer;
+use Watch\Laravel\Queue\JobContext;
+use Watch\Laravel\Queue\JobSettings;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 use Watch\Laravel\Spool\DropLedger;
@@ -74,6 +79,11 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->singleton(OutgoingUrlSanitizer::class);
         $this->app->singleton(ExecutionSourceTracker::class);
         $this->app->singleton(OutgoingRequestCollector::class);
+        $this->app->singleton(JobContext::class);
+        $this->app->singleton(JobSettings::class);
+        $this->app->singleton(ExceptionFingerprint::class);
+        $this->app->singleton(ExceptionSnapshot::class);
+        $this->app->singleton(JobCapturer::class);
         $this->app->singleton(RequestCapturer::class);
         $this->app->singleton(Runtime::class, static fn (): Runtime => new Runtime());
 
@@ -101,6 +111,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerMiddleware();
         $this->registerExceptionCollector();
         $this->registerOutgoingCollector();
+        $this->registerJobCollector();
         $this->registerLifecycle();
         $this->registerE2eFixtureRoute();
     }
@@ -352,6 +363,7 @@ class WatchServiceProvider extends ServiceProvider
                 $events->listen('Laravel\Octane\Events\RequestReceived', function (): void {
                     try {
                         $collector = $this->app->make(ExceptionCollector::class);
+                        $this->discardReleasedExceptions();
                         $collector->flush(null);
                         $collector->forgetResponseNote();
                     } catch (Throwable) {
@@ -382,9 +394,10 @@ class WatchServiceProvider extends ServiceProvider
             return;
         }
 
-        $flushOutsideRequest = static function () use ($collector): void {
+        $flushOutsideRequest = function () use ($collector): void {
             try {
                 if (! $collector->requestIsActive()) {
+                    $this->discardReleasedExceptions();
                     $collector->flush(null);
                 }
             } catch (Throwable) {
@@ -401,12 +414,14 @@ class WatchServiceProvider extends ServiceProvider
 
         // The payload may be empty: Lifecycle tests dispatch the event name
         // with no object, and Laravel then calls the listener with zero arguments.
-        $events->listen('Illuminate\Queue\Events\JobFailed', static function ($event = null) use ($collector): void {
+        $events->listen('Illuminate\Queue\Events\JobFailed', function ($event = null) use ($collector): void {
             try {
                 $exception = is_object($event) ? ($event->exception ?? null) : null;
                 if ($exception instanceof Throwable) {
+                    $this->discardReleasedExceptions();
                     $collector->record($exception, false);
                 } elseif (! $collector->requestIsActive()) {
+                    $this->discardReleasedExceptions();
                     $collector->flush(null);
                 }
             } catch (Throwable) {
@@ -416,6 +431,27 @@ class WatchServiceProvider extends ServiceProvider
 
         if (method_exists($this->app, 'terminating')) {
             $this->app->terminating($flushOutsideRequest);
+        }
+    }
+
+    /**
+     * JobCapturer already sent this throwable for a released attempt. Drop it
+     * before ExceptionCollector flushes, or the worker's report() becomes a
+     * second exception with a new ingest id and a null request id.
+     */
+    private function discardReleasedExceptions(): void
+    {
+        try {
+            if (! $this->app->bound(JobCapturer::class)) {
+                return;
+            }
+
+            $capturer = $this->app->make(JobCapturer::class);
+            if ($capturer instanceof JobCapturer) {
+                $capturer->discardEmittedExceptions();
+            }
+        } catch (Throwable) {
+            // Deduping a released exception must not break the flush.
         }
     }
 
@@ -444,6 +480,21 @@ class WatchServiceProvider extends ServiceProvider
             }
         } catch (Throwable) {
             // Registering outgoing capture must not break the host app.
+        }
+    }
+
+    /**
+     * Queue capture does not require illuminate/queue, Horizon, or Octane.
+     * Missing event classes are listened to by name; only the Laravel 9+
+     * released-after-exception class is guarded inside JobCapturer.
+     */
+    private function registerJobCollector(): void
+    {
+        try {
+            $events = $this->app->make(Dispatcher::class);
+            $this->app->make(JobCapturer::class)->listen($events);
+        } catch (Throwable) {
+            // Registering job capture must not break the host app.
         }
     }
 

@@ -16,6 +16,8 @@ use Watch\Laravel\Http\RequestCapturer;
 use Watch\Laravel\Logging\RequestLogProcessor;
 use Watch\Laravel\Outgoing\ExecutionSourceTracker;
 use Watch\Laravel\Outgoing\OutgoingRequestCollector;
+use Watch\Laravel\Queue\JobCapturer;
+use Watch\Laravel\Queue\JobContext;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 
@@ -51,6 +53,8 @@ final class OctaneListener
         Transport::class,
         OutgoingRequestCollector::class,
         ExecutionSourceTracker::class,
+        JobCapturer::class,
+        JobContext::class,
     ];
 
     /**
