@@ -32,6 +32,7 @@ final class OutgoingUrlSanitizerTest extends TestCase
 
         $this->assertSame($host, $result['host']);
         $this->assertSame($path, $result['path']);
+        $this->assertSame($path, $this->sanitizer()->sanitize('https://'.$host.$result['path'])['path']);
         $this->assertTrue(mb_check_encoding($result['path'], 'UTF-8'));
         $this->assertLessThanOrEqual($maxPathBytes ?? 2048, strlen($result['path']));
         $this->assertStringNotContainsString('#', $result['host'].$result['path']);
@@ -109,6 +110,22 @@ final class OutgoingUrlSanitizerTest extends TestCase
             'sms.example.test',
             '/send?reset_token=[redacted]&api-key=[redacted]&ok=1',
             ['abc', 'hidden'],
+        ];
+
+        yield 'Telegram token' => [
+            'https://api.telegram.org/bot123456789:AAHfakefakefakefake/sendMessage', 'api.telegram.org',
+            '/bot[redacted]/sendMessage', ['123456789', 'AAHfakefakefakefake'],
+        ];
+        yield 'generic token on custom host' => [
+            'https://bot.example.test/12345:fake_key-', 'bot.example.test', '/[redacted]', ['fake_key-'],
+        ];
+        yield 'Slack webhook before truncation' => [
+            'https://hooks.slack.com/services/T000/B000/fakesecretvalue', 'hooks.slack.com',
+            '/services/[red', ['T000', 'B000', 'fakesecretvalue'], 14,
+        ];
+        yield 'Discord token with subpath and query' => [
+            'https://DiscordApp.com:8443/api/webhooks/123/fake-webhook-token/messages/1?token=fake&page=2',
+            'discordapp.com:8443', '/api/webhooks/123/[redacted]/messages/1?token=[redacted]&page=2', ['fake'],
         ];
 
         yield 'empty sensitive value and bare flag' => [

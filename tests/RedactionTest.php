@@ -173,6 +173,29 @@ final class RedactionTest extends TestCase
         $this->assertSame('[object]', $redacted['o']);
     }
 
+    public function test_message_masks_webhook_urls_and_bot_tokens_idempotently(): void
+    {
+        $redactor = new Redactor();
+        $cases = [
+            'cURL error 28 for https://api.telegram.org/bot123456789:AAHfakefakefakefake/sendMessage' =>
+                'cURL error 28 for https://api.telegram.org/bot[redacted]/sendMessage',
+            'POST "https://user:fake@Hooks.Slack.com:8443/services/T000/B000/fakesecretvalue?token=fake&page=2"' =>
+                'POST "https://[redacted]@Hooks.Slack.com:8443/services/[redacted]?token=[redacted]&page=2"',
+            'POST `https://discord.com/api/webhooks/123456789012345678/fake-webhook-token/messages/1` failed' =>
+                'POST `https://discord.com/api/webhooks/123456789012345678/[redacted]/messages/1` failed',
+            'Failed (https://discordapp.com/api/webhooks/123456789012345678/fake-webhook-token)' =>
+                'Failed (https://discordapp.com/api/webhooks/123456789012345678/[redacted])',
+            'credential 12345:fake_key- rejected' => 'credential [redacted] rejected',
+            'At 12:34:56 [2001:db8::1] GET https://example.test/services/T000/ok' =>
+                'At 12:34:56 [2001:db8::1] GET https://example.test/services/T000/ok',
+        ];
+
+        foreach ($cases as $message => $expected) {
+            $this->assertSame($expected, $redactor->redactMessage($message));
+            $this->assertSame($expected, $redactor->redactMessage($expected));
+        }
+    }
+
     /**
      * @return iterable<string, array{string, string}>
      *

@@ -57,7 +57,7 @@ final class OutgoingUrlSanitizer
             return $this->fallback();
         }
 
-        $path = $this->path($parts);
+        $path = $this->path($parts, $host);
         if ($this->leaksUserinfo($parts, $host, $path)) {
             return $this->fallback();
         }
@@ -169,11 +169,16 @@ final class OutgoingUrlSanitizer
     /**
      * @param array<string, mixed> $parts
      */
-    private function path(array $parts): string
+    private function path(array $parts, string $host): string
     {
         $path = isset($parts['path']) && is_string($parts['path']) ? $parts['path'] : '';
         if ($path === '' || $path[0] !== '/') {
             $path = '/'.ltrim($path, '/');
+        }
+
+        $path = $this->redactor->redactPathSecrets($path, $host);
+        if ($path === Redactor::REPLACEMENT) {
+            return $this->limit($path);
         }
 
         $query = isset($parts['query']) && is_string($parts['query']) ? $parts['query'] : '';

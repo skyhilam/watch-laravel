@@ -147,6 +147,33 @@ final class OutgoingRequestCollectorTest extends TestCase
         $this->assertStringNotContainsString('card', $encoded);
     }
 
+    public function test_collector_sends_only_masked_webhook_and_bot_paths(): void
+    {
+        $paths = [
+            'https://api.telegram.org/bot123456789:AAHfakefakefakefake/sendMessage' => '/bot[redacted]/sendMessage',
+            'https://hooks.slack.com/services/T000/B000/fakesecretvalue' => '/services/[redacted]',
+            'https://discord.com/api/webhooks/123456789012345678/fake-webhook-token' => '/api/webhooks/123456789012345678/[redacted]',
+            'https://example.test/12345:fake_key-' => '/[redacted]',
+            'https://example.test/api/users/456/profile' => '/api/users/456/profile',
+        ];
+
+        $expectedPaths = [];
+        foreach ($paths as $url => $expected) {
+            FakeHttpEvents::dispatchCall($this->events(), 'POST', $url);
+            FakeHttpEvents::dispatchCall($this->events(), 'POST', 'https://'.parse_url($url, PHP_URL_HOST).$expected);
+            $expectedPaths[] = $expected;
+            $expectedPaths[] = $expected;
+        }
+
+        $this->flushOutgoing();
+        $events = $this->transport->ofType('outgoing_request');
+        $this->assertSame($expectedPaths, array_column($events, 'path'));
+        $encoded = json_encode($events, JSON_THROW_ON_ERROR);
+        foreach (['AAHfakefakefakefake', 'T000', 'B000', 'fakesecretvalue', 'fake-webhook-token', 'fake_key-'] as $secret) {
+            $this->assertStringNotContainsString($secret, $encoded);
+        }
+    }
+
     public function test_pool_records_each_call_and_retry_records_each_attempt(): void
     {
         if (! FakeHttpEvents::hasGuzzleHttpClient()) {

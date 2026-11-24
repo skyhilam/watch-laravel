@@ -42,6 +42,8 @@ final class Redactor
         'cvv',
     ];
 
+    private const BOT_TOKEN = '~(?<!\d)\d{5,}+:[A-Za-z0-9_-]{8,}+~';
+
     private const URL_HEADERS = [
         'referer', 'origin', 'location', 'content_location',
         'x_original_url', 'x_rewrite_url', 'x_forwarded_uri',
@@ -79,7 +81,7 @@ final class Redactor
      * Mask secrets inside an exception message. Array and header redaction are
      * unchanged: this only rewrites key=value / key: value, quoted JSON pairs
      * such as "password":"..." and 'token':'...', Authorization bearer or basic
-     * tokens, URL userinfo, and sensitive query parameters.
+     * tokens, URL userinfo, sensitive query parameters, and path credentials.
      * A regex failure replaces the whole message so the raw secret is not kept.
      */
     public function redactMessage(string $message): string
@@ -96,7 +98,12 @@ final class Redactor
         $message = $this->redactBearer($message);
         $message = $this->redactAssignments($message);
 
-        return $message;
+        return $this->redactMessagePaths($message);
+    }
+
+    public function redactPathSecrets(string $path, string $host): string
+    {
+        return $this->replacePathSecrets($path, $host) ?? self::REPLACEMENT;
     }
 
     public function isSensitiveKey(string $key): bool
@@ -221,6 +228,48 @@ final class Redactor
         return '';
     }
 
+    /** A regex error returns null so the caller can mask the entire URL or message. */
+    private function replacePathSecrets(string $path, ?string $host): ?string
+    {
+        $patterns = ['~(?:^|/)bot\K\d++:[A-Za-z0-9_-]++(?=/|\z)~', self::BOT_TOKEN];
+        $hostname = strtolower(explode(':', $host ?? '', 2)[0]);
+
+        if ($hostname === 'hooks.slack.com') {
+            $patterns[] = '~^/services/\K.+~s';
+        } elseif ($hostname === 'discord.com' || $hostname === 'discordapp.com') {
+            $patterns[] = '~^/api/webhooks/[^/]+/\K[^/]+~';
+        }
+
+        return preg_replace($patterns, self::REPLACEMENT, $path);
+    }
+
+    private function redactMessagePaths(string $message): string
+    {
+        $failed = false;
+        // Leave the authority, query and surrounding exception text in place.
+        $message = preg_replace_callback(
+            '~\b([a-z][a-z0-9+.-]*://[^\s/?#<>"\'`()]+)(/[^\s?#<>"\'`()]*)~i',
+            function (array $match) use (&$failed): string {
+                $host = parse_url($match[1], PHP_URL_HOST);
+                $path = $this->replacePathSecrets($match[2], is_string($host) ? $host : null);
+                if ($path === null) {
+                    $failed = true;
+
+                    return self::REPLACEMENT;
+                }
+
+                return $match[1].$path;
+            },
+            $message,
+        );
+
+        if ($failed || $message === null) {
+            return self::REPLACEMENT;
+        }
+
+        return preg_replace(self::BOT_TOKEN, self::REPLACEMENT, $message) ?? self::REPLACEMENT;
+    }
+
     private function redactUserinfo(string $message): string
     {
         $redacted = preg_replace(
@@ -262,8 +311,9 @@ final class Redactor
         }
 
         // Paired quotes around the key ("password" / 'password') are part of the
-        // key. String values accept escapes; a bare value stops before } or ].
-        $pattern = '~((["\'])(?:'.$keys.')\2|(?<![A-Za-z0-9_-])(?:'.$keys.'))(\s*[:=]\s*)(?:"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"|\'([^\'\\\\]*(?:\\\\.[^\'\\\\]*)*)\'|((?:bearer|basic|digest)\s+\S+)|([^\s&#,;"\'}\]]+))~i';
+        // key. A bare value stops before } or ] unless consuming a complete
+        // [redacted] marker from an earlier pass.
+        $pattern = '~((["\'])(?:'.$keys.')\2|(?<![A-Za-z0-9_-])(?:'.$keys.'))(\s*[:=]\s*)(?:"([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"|\'([^\'\\\\]*(?:\\\\.[^\'\\\\]*)*)\'|((?:bearer|basic|digest)\s+\S+)|(\[redacted\]|[^\s&#,;"\'}\]]+))~i';
         $redacted = preg_replace_callback($pattern, static function (array $match): string {
             $prefix = $match[1].$match[3];
             $scheme = $match[6] ?? '';
