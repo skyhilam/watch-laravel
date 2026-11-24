@@ -587,6 +587,21 @@ final class DrainerTest extends TestCase
         $this->assertSame([], $this->spool->files());
     }
 
+    public function test_exception_events_are_spooled_for_central(): void
+    {
+        $receiver = new Receiver($this->spool, new Quota(10), $this->recorder);
+        $payload = "{\"type\":\"exception\",\"ingest_id\":\"ex-1\"}\n{\"type\":\"nope\",\"ingest_id\":\"ex-2\"}\n";
+
+        $result = $receiver->ingest($payload, 'key-a');
+
+        $this->assertSame(['accepted' => 1, 'quota_exceeded' => 0, 'invalid' => 1, 'spooled' => true], $result);
+        $this->assertSame(1, $this->recorder->count(Reason::TRANSPORT_ERROR));
+        $files = $this->spool->files();
+        $this->assertCount(1, $files);
+        $this->assertStringContainsString('"type":"exception"', (string) file_get_contents($files[0]->path));
+        $this->assertStringNotContainsString('"type":"nope"', (string) file_get_contents($files[0]->path));
+    }
+
     public function test_missing_or_invalid_batch_bytes_uses_bounded_default(): void
     {
         foreach ([null, 0, -1, '1', false, [], 1.5] as $invalid) {

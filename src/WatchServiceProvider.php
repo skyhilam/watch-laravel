@@ -422,9 +422,10 @@ class WatchServiceProvider extends ServiceProvider
     /**
      * scripts/e2e.sh sets WATCH_E2E_FIXTURE. Testbench 6's `serve` does not
      * forward TESTBENCH_WORKING_PATH, so workbench/routes/web.php is not
-     * discovered and GET /watch-e2e is a 404. Register the same fixture when
-     * that route is still missing and the application is outside production.
-     * Keep the closure in sync with workbench/routes/web.php.
+     * discovered and the e2e routes are 404. Register each missing fixture
+     * when the application is outside production. A host that never sets
+     * WATCH_E2E_FIXTURE does not get these routes. Keep the closures in sync
+     * with workbench/routes/web.php.
      */
     private function registerE2eFixtureRoute(): void
     {
@@ -434,17 +435,35 @@ class WatchServiceProvider extends ServiceProvider
 
         $this->app->booted(function (): void {
             $router = $this->app->make('router');
-            if (! is_object($router) || ! method_exists($router, 'has') || $router->has('watch.e2e.ping')) {
+            if (! is_object($router) || ! method_exists($router, 'has')) {
                 return;
             }
 
-            $router->get('/watch-e2e', static function () {
-                \Illuminate\Support\Facades\Log::info('watch-e2e correlated log', [
-                    'password' => 'E2E_PLAINTEXT_PASSWORD',
-                ]);
+            if (! $router->has('watch.e2e.ping')) {
+                $router->get('/watch-e2e', static function () {
+                    \Illuminate\Support\Facades\Log::info('watch-e2e correlated log', [
+                        'password' => 'E2E_PLAINTEXT_PASSWORD',
+                    ]);
 
-                return response('watch-e2e-ok', 200);
-            })->middleware('web')->name('watch.e2e.ping');
+                    return response('watch-e2e-ok', 200);
+                })->middleware('web')->name('watch.e2e.ping');
+            }
+
+            if (! $router->has('watch.e2e.exception')) {
+                $router->get('/watch-e2e-exception', static function () {
+                    \Illuminate\Support\Facades\Log::info('watch-e2e exception correlated log', [
+                        'password' => 'E2E_EXCEPTION_PLAINTEXT_SECRET',
+                    ]);
+
+                    try {
+                        throw new \RuntimeException('watch-e2e exception password=E2E_EXCEPTION_PLAINTEXT_SECRET');
+                    } catch (\Throwable $exception) {
+                        app(ExceptionCollector::class)->record($exception, true);
+                    }
+
+                    return response('watch-e2e-exception-ok', 200);
+                })->middleware('web')->name('watch.e2e.exception');
+            }
         });
     }
 
