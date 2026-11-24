@@ -10,6 +10,7 @@ use Illuminate\Contracts\Console\Kernel as ConsoleKernel;
 use Illuminate\Contracts\Events\Dispatcher;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Laravel\Octane\Events\RequestReceived;
 use Laravel\Octane\Events\RequestTerminated;
@@ -24,12 +25,16 @@ use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Http\CaptureRequest;
 use Watch\Laravel\Lifecycle\FlushListener;
 use Watch\Laravel\Lifecycle\OctaneListener;
+use Watch\Laravel\Outgoing\ExecutionSourceTracker;
+use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 use Watch\Laravel\Sampling\Sampler;
 use Watch\Laravel\Spool\DropLedger;
 use Watch\Laravel\Spool\SpoolWriter;
 use Watch\Laravel\Tests\Support\FailingSpoolWriter;
 use Watch\Laravel\Tests\Support\FakeAgentSocket;
 use Watch\Laravel\Tests\Support\FakeDropLedger;
+use Watch\Laravel\Tests\Outgoing\FakeHttpEvents;
+use Watch\Laravel\Tests\Support\InMemoryTransport;
 use Watch\Laravel\Transport\AgentTransport;
 use Watch\Laravel\Transport\AgentUnreachable;
 
@@ -174,9 +179,63 @@ final class LifecycleTest extends TestCase
         $this->assertTrue($this->app->resolved(Transport::class));
         $first = clone $this->app;
         $second = clone $this->app;
-        foreach ([Transport::class, Sampler::class, Recorder::class] as $service) {
+        foreach ([Transport::class, Sampler::class, Recorder::class, OutgoingRequestCollector::class, ExecutionSourceTracker::class] as $service) {
             $this->assertSame($first->make($service), $second->make($service), $service.' must outlive a request');
         }
+    }
+
+    public function test_flush_listener_sends_idle_outgoing_requests_and_keeps_an_active_http_request(): void
+    {
+        $memory = new InMemoryTransport();
+        $this->app->instance(Transport::class, $memory);
+        if (FakeHttpEvents::hasGuzzleHttpClient()) {
+            Http::fake(['*' => Http::response('ok', 201)]);
+        }
+
+        $context = $this->app->make(RequestContext::class);
+        $context->begin('still-open', true, 1.0, null, null, 200);
+        $this->recordOutgoing('GET', 'https://pay.example.test/during-request?token=secret-token', 201);
+        FlushListener::flush($this->app);
+        $this->assertSame([], $memory->ofType('outgoing_request'), 'an active HTTP request is not flushed early');
+        $this->assertTrue($context->isActive());
+
+        $context->reset();
+        $this->recordOutgoing('GET', 'https://sms.example.test/after', 201);
+        FlushListener::flush($this->app);
+
+        $events = $memory->ofType('outgoing_request');
+        $this->assertCount(1, $events);
+        $this->assertSame('other', $events[0]['source_type']);
+        $this->assertNull($events[0]['request_id']);
+        $this->assertSame('sms.example.test', $events[0]['host']);
+        $this->assertSame(201, $events[0]['status']);
+    }
+
+    public function test_octane_request_received_flushes_outgoing_before_the_context_reset(): void
+    {
+        $memory = new InMemoryTransport();
+        $this->app->instance(Transport::class, $memory);
+        if (FakeHttpEvents::hasGuzzleHttpClient()) {
+            Http::fake(['*' => Http::response('ok', 202)]);
+        }
+
+        $context = $this->app->make(RequestContext::class);
+        $context->begin('leftover-outgoing', true, 1.0, null, null, 200);
+        $this->recordOutgoing('GET', 'https://user:secret@pay.example.test/health?token=secret-token', 202);
+        $this->assertSame([], $memory->ofType('outgoing_request'));
+
+        $this->app->make(Dispatcher::class)->dispatch(new RequestReceived());
+
+        $events = $memory->ofType('outgoing_request');
+        $this->assertCount(1, $events);
+        $this->assertSame('leftover-outgoing', $events[0]['request_id'], 'flush runs before OctaneListener::reset()');
+        $this->assertSame('http', $events[0]['source_type']);
+        $this->assertSame('pay.example.test', $events[0]['host']);
+        $this->assertSame('/health?token=[redacted]', $events[0]['path']);
+        $this->assertSame(202, $events[0]['status']);
+        $this->assertFalse($context->isActive());
+        $this->assertSame([], $context->pullOutgoingRequests());
+        $this->assertStringNotContainsString('secret', json_encode($events[0], JSON_THROW_ON_ERROR));
     }
 
     public function test_command_finished_flushes_pending_drop_counts(): void
@@ -293,5 +352,16 @@ final class LifecycleTest extends TestCase
         Container::setInstance($this->app);
         Facade::clearResolvedInstances();
         Facade::setFacadeApplication($this->app);
+    }
+
+    private function recordOutgoing(string $method, string $url, int $status): void
+    {
+        if (FakeHttpEvents::hasGuzzleHttpClient()) {
+            Http::send($method, $url);
+
+            return;
+        }
+
+        FakeHttpEvents::dispatchCall($this->app->make(Dispatcher::class), $method, $url, $status);
     }
 }

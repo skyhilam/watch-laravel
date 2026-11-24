@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Tests\Agent;
 
+use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Support\Facades\Http;
 use RuntimeException;
+use Watch\Laravel\Tests\Outgoing\FakeHttpEvents;
 use Watch\Laravel\Agent\Agent;
 use Watch\Laravel\Agent\Backoff;
 use Watch\Laravel\Agent\CentralResponse;
@@ -54,6 +57,22 @@ final class AgentEndToEndTest extends TestCase
         parent::tearDown();
     }
 
+    protected function defineRoutes($router): void
+    {
+        parent::defineRoutes($router);
+
+        $router->get('/outgoing', function () {
+            $url = 'https://user:e2e-password@pay.example.test/charge?token=e2e-secret-token&page=1';
+            if (FakeHttpEvents::hasGuzzleHttpClient()) {
+                Http::withBody('e2e-outgoing-secret-body', 'text/plain')->get($url);
+            } else {
+                FakeHttpEvents::dispatchCall(app(Dispatcher::class), 'GET', $url, 201);
+            }
+
+            return 'outgoing-ok';
+        });
+    }
+
     private function receiver(int $quota): Receiver
     {
         return new Receiver($this->agentSpool, new Quota($quota), $this->agentRecorder);
@@ -97,6 +116,64 @@ final class AgentEndToEndTest extends TestCase
         $this->assertSame(2, $drained['sent']);
         $this->assertSame([], $this->spoolFiles());
         $this->assertSame('key-a', $client->posts[0]['key']);
+    }
+
+    public function test_an_outgoing_call_reaches_the_agent_and_counts_toward_quota(): void
+    {
+        $this->listener->start();
+        if (FakeHttpEvents::hasGuzzleHttpClient()) {
+            Http::fake([
+                'pay.example.test/*' => Http::response('{"ok":true}', 201),
+            ]);
+        }
+
+        $response = $this->get('/outgoing');
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertSame('outgoing-ok', $response->getContent());
+
+        $payloads = $this->listener->accept(500);
+        if (count($payloads) < 2) {
+            $payloads = array_merge($payloads, $this->listener->accept(500));
+        }
+        $this->assertGreaterThanOrEqual(2, count($payloads));
+
+        $events = [];
+        foreach ($payloads as $payload) {
+            foreach (explode("\n", trim($payload)) as $line) {
+                if ($line !== '') {
+                    $events[] = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                }
+            }
+        }
+
+        $outgoing = array_values(array_filter(
+            $events,
+            static fn (array $event): bool => ($event['type'] ?? null) === 'outgoing_request',
+        ));
+        $requests = array_values(array_filter(
+            $events,
+            static fn (array $event): bool => ($event['type'] ?? null) === 'request',
+        ));
+        $this->assertCount(1, $outgoing);
+        $this->assertCount(1, $requests);
+        $this->assertSame($requests[0]['request_id'], $outgoing[0]['request_id']);
+        $this->assertSame('pay.example.test', $outgoing[0]['host']);
+        $this->assertSame('/charge?token=[redacted]&page=1', $outgoing[0]['path']);
+        $this->assertSame(201, $outgoing[0]['status']);
+        $this->assertSame('http', $outgoing[0]['source_type']);
+        $encoded = json_encode($outgoing[0], JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('e2e-outgoing-secret-body', $encoded);
+        $this->assertStringNotContainsString('e2e-secret-token', $encoded);
+        $this->assertStringNotContainsString('e2e-password', $encoded);
+
+        $result = $this->receiver(1)->ingest(implode("\n", array_map(
+            static fn (array $event): string => json_encode($event, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
+            $events,
+        )), 'key-a');
+        $this->assertSame(1, $result['accepted']);
+        $this->assertSame(1, $result['quota_exceeded']);
+        $this->assertSame(0, $result['invalid']);
+        $this->assertSame(1, $this->agentRecorder->count(Reason::QUOTA_EXCEEDED));
     }
 
     public function test_quota_exceeded_drops_new_events_but_business_stays_200(): void

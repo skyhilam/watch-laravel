@@ -82,6 +82,28 @@ final class RequestEnvelopeFactory
     }
 
     /**
+     * Outgoing calls keep request_id null outside a request. Trace fields are
+     * added only when this execution captured a valid traceparent. Body fields
+     * are dropped here so a caller cannot attach a request or response body.
+     *
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    public function outgoingRequest(RequestContext $context, array $fields): array
+    {
+        $event = $fields;
+        unset($event['body'], $event['request_body'], $event['response_body'], $event['payload']);
+        $event['type'] = 'outgoing_request';
+        $event['ingest_id'] = $this->ingestId();
+        $event['request_id'] = $context->isActive() ? $context->requestId() : null;
+        if (! isset($event['started_at']) || ! is_string($event['started_at']) || $event['started_at'] === '') {
+            $event['started_at'] = $this->stamp(null);
+        }
+
+        return $this->withTrace($event, $context);
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function completeness(

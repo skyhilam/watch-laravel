@@ -111,8 +111,10 @@ return [
     |--------------------------------------------------------------------------
     |
     | 每個 collector 一個 sibling key，之後可以加 query／job 等而不改 request capture。
-    | 舊版已發佈 config 冇 collectors 時，exception 預設開啟。
-    | 程式逐項讀取：缺 key、錯型別或非正整數限額回退下面嘅預設。0 唔代表無限。
+    | 舊版已發佈 config 冇 collectors，或者缺少某個 sibling key 時，
+    | exception 同 outgoing_request 都預設開啟。
+    | 程式逐項用 Limits::enabled／Limits::positive 讀取：缺 key、錯型別或非正整數
+    | 限額回退下面嘅預設。0 唔代表無限。
     | enabled 只接受 bool。其他型別當作未設定，維持預設開啟。
     | 全路徑 fail-open：collector 或 transport 出錯都唔可以改業務 response。
     |
@@ -126,6 +128,11 @@ return [
             'max_frame_bytes' => 512, // file 同 call 各自上限。
             'max_stack_bytes' => 8192, // 成個 stack JSON；放唔落就由最遠嘅幀開始丟。
             'max_previous' => 3, // previous 鏈只留 class／message／file／line，冇 stack。
+        ],
+        'outgoing_request' => [
+            'enabled' => true, // 舊版已 publish config 缺少呢個 key 時，程式預設開啟。
+            'max_per_request' => 50, // 每次執行最多幾條外呼。0 或非正整數回退 50，唔係無限。
+            'max_path_bytes' => 2048, // 遮罩後 path（含 query）bytes。唔會切斷成半個 UTF-8。0 回退 2048。
         ],
     ],
 

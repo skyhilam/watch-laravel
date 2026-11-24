@@ -10,6 +10,13 @@ final class Reason
 
     public const LOG_BUFFER_OVERFLOW = 'log_buffer_overflow';
 
+    /**
+     * Reported as its own completeness event when the per-execution outgoing
+     * buffer is flushed. Not a transport drop, so it stays out of drops() and
+     * is not counted twice.
+     */
+    public const OUTGOING_REQUEST_BUFFER_OVERFLOW = 'outgoing_request_buffer_overflow';
+
     public const TRANSPORT_ERROR = 'transport_error';
 
     public const AGENT_UNREACHABLE = 'agent_unreachable';
@@ -44,6 +51,7 @@ final class Reason
         return [
             self::SAMPLED_OUT,
             self::LOG_BUFFER_OVERFLOW,
+            self::OUTGOING_REQUEST_BUFFER_OVERFLOW,
             self::TRANSPORT_ERROR,
             self::AGENT_UNREACHABLE,
             self::CENTRAL_UNREACHABLE,

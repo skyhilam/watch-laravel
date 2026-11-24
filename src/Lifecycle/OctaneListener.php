@@ -14,6 +14,8 @@ use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
 use Watch\Laravel\Http\RequestCapturer;
 use Watch\Laravel\Logging\RequestLogProcessor;
+use Watch\Laravel\Outgoing\ExecutionSourceTracker;
+use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 
@@ -47,6 +49,8 @@ final class OctaneListener
         RequestLogProcessor::class,
         RequestCapturer::class,
         Transport::class,
+        OutgoingRequestCollector::class,
+        ExecutionSourceTracker::class,
     ];
 
     /**

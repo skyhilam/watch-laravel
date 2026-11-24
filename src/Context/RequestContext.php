@@ -11,6 +11,8 @@ final class RequestContext
 {
     public const DEFAULT_EXCEPTION_LIMIT = 50;
 
+    public const DEFAULT_OUTGOING_LIMIT = 50;
+
     private bool $active = false;
 
     private bool $sampled = false;
@@ -49,6 +51,18 @@ final class RequestContext
     private int $exceptionLimit = self::DEFAULT_EXCEPTION_LIMIT;
 
     private int $exceptionOverflow = 0;
+
+    /**
+     * Outgoing HTTP calls seen during this worker turn.
+     * reset() drops them so the next Octane request or job cannot inherit them.
+     *
+     * @var list<array<string, mixed>>
+     */
+    private array $outgoingRequests = [];
+
+    private int $outgoingLimit = self::DEFAULT_OUTGOING_LIMIT;
+
+    private int $outgoingOverflow = 0;
 
     /**
      * The context of the request being handled right now.
@@ -91,6 +105,9 @@ final class RequestContext
         $this->exceptions = [];
         $this->exceptionOverflow = 0;
         $this->exceptionLimit = self::DEFAULT_EXCEPTION_LIMIT;
+        $this->outgoingRequests = [];
+        $this->outgoingOverflow = 0;
+        $this->outgoingLimit = self::DEFAULT_OUTGOING_LIMIT;
     }
 
     public function rememberException(\Throwable $throwable, bool $handled, string $occurredAt): void
@@ -179,6 +196,52 @@ final class RequestContext
         $this->exceptionOverflow = 0;
 
         return $items;
+    }
+
+    /**
+     * Keep the first calls up to the limit. Later calls increment the overflow
+     * counter and are not stored. A limit of 0 drops every call.
+     *
+     * @param array<string, mixed> $entry
+     */
+    public function pushOutgoingRequest(array $entry): void
+    {
+        if (count($this->outgoingRequests) >= $this->outgoingLimit) {
+            $this->outgoingOverflow++;
+
+            return;
+        }
+
+        $this->outgoingRequests[] = $entry;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function pullOutgoingRequests(): array
+    {
+        $items = $this->outgoingRequests;
+        $this->outgoingRequests = [];
+        $this->outgoingOverflow = 0;
+
+        return $items;
+    }
+
+    public function outgoingOverflow(): int
+    {
+        return $this->outgoingOverflow;
+    }
+
+    public function setOutgoingLimit(int $limit): void
+    {
+        $this->outgoingLimit = max(0, $limit);
+        $excess = count($this->outgoingRequests) - $this->outgoingLimit;
+        if ($excess <= 0) {
+            return;
+        }
+
+        $this->outgoingOverflow += $excess;
+        $this->outgoingRequests = array_slice($this->outgoingRequests, 0, $this->outgoingLimit);
     }
 
     public function begin(

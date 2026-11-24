@@ -10,6 +10,7 @@ use Illuminate\Contracts\Foundation\Application;
 use Throwable;
 use Watch\Laravel\Contracts\Flushable;
 use Watch\Laravel\Contracts\Transport;
+use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 
 /**
  * Flush pending transport state when a console command finishes, a queue job
@@ -41,6 +42,16 @@ final class FlushListener
 
     public static function flush(Container $app): void
     {
+        try {
+            if ($app->bound(OutgoingRequestCollector::class)) {
+                // HTTP requests flush from RequestCapturer so a sync job or
+                // Artisan::call() inside one does not send early.
+                $app->make(OutgoingRequestCollector::class)->flushIfIdle();
+            }
+        } catch (Throwable) {
+            // Outgoing flush stays best effort, like the transport flush below.
+        }
+
         try {
             if (! $app->bound(Transport::class)) {
                 return;

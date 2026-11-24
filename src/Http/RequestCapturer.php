@@ -19,6 +19,7 @@ use Watch\Laravel\Context\RequestContext;
 use Watch\Laravel\Context\Traceparent;
 use Watch\Laravel\Contracts\Transport;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
+use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 use Watch\Laravel\Support\Uuid7;
@@ -32,6 +33,7 @@ final class RequestCapturer
         private readonly Recorder $recorder,
         private readonly RequestEnvelopeFactory $envelopes,
         private readonly ExceptionCollector $exceptions,
+        private readonly ?OutgoingRequestCollector $outgoing = null,
     ) {}
 
     public function enabled(): bool
@@ -84,6 +86,7 @@ final class RequestCapturer
             } catch (Throwable) {
                 // Flushing must not change the response.
             }
+            $this->flushOutgoing();
 
             return;
         }
@@ -96,6 +99,8 @@ final class RequestCapturer
             } catch (Throwable) {
                 // The request envelope was already handed to transport.
             }
+            // Outgoing calls still need this request_id, so flush before reset.
+            $this->flushOutgoing();
             $context->reset();
         }
     }
@@ -213,6 +218,15 @@ final class RequestCapturer
         }
 
         return $default;
+    }
+
+    private function flushOutgoing(): void
+    {
+        try {
+            $this->outgoing?->flush();
+        } catch (Throwable) {
+            // Outgoing capture must not change the response.
+        }
     }
 
     private function context(): RequestContext

@@ -27,6 +27,11 @@ use Watch\Laravel\Lifecycle\FlushListener;
 use Watch\Laravel\Lifecycle\OctaneListener;
 use Watch\Laravel\Logging\RequestLogProcessor;
 use Watch\Laravel\Logging\RequestLogTap;
+use Watch\Laravel\Outgoing\ExecutionSourceTracker;
+use Watch\Laravel\Outgoing\FailureClassifier;
+use Watch\Laravel\Outgoing\OutgoingRequestCollector;
+use Watch\Laravel\Outgoing\OutgoingSettings;
+use Watch\Laravel\Outgoing\OutgoingUrlSanitizer;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 use Watch\Laravel\Spool\DropLedger;
@@ -64,6 +69,11 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->singleton(RequestEnvelopeFactory::class);
         $this->app->singleton(RequestLogProcessor::class);
         $this->app->singleton(ExceptionCollector::class);
+        $this->app->singleton(OutgoingSettings::class);
+        $this->app->singleton(FailureClassifier::class);
+        $this->app->singleton(OutgoingUrlSanitizer::class);
+        $this->app->singleton(ExecutionSourceTracker::class);
+        $this->app->singleton(OutgoingRequestCollector::class);
         $this->app->singleton(RequestCapturer::class);
         $this->app->singleton(Runtime::class, static fn (): Runtime => new Runtime());
 
@@ -90,6 +100,7 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerLogProcessor();
         $this->registerMiddleware();
         $this->registerExceptionCollector();
+        $this->registerOutgoingCollector();
         $this->registerLifecycle();
         $this->registerE2eFixtureRoute();
     }
@@ -405,6 +416,34 @@ class WatchServiceProvider extends ServiceProvider
 
         if (method_exists($this->app, 'terminating')) {
             $this->app->terminating($flushOutsideRequest);
+        }
+    }
+
+    /**
+     * Outgoing listeners are attached before Octane reset, same as exceptions:
+     * RequestReceived flushes the previous buffer while its request_id is
+     * still on the context, and only then does OctaneListener::reset() run.
+     */
+    private function registerOutgoingCollector(): void
+    {
+        try {
+            $events = $this->app->make(Dispatcher::class);
+            $this->app->make(OutgoingRequestCollector::class)->listen($events);
+            $this->app->make(ExecutionSourceTracker::class)->listen($this->app, $events);
+
+            if (class_exists('Laravel\Octane\Events\RequestReceived')) {
+                $events->listen('Laravel\Octane\Events\RequestReceived', function (): void {
+                    try {
+                        $collector = $this->app->make(OutgoingRequestCollector::class);
+                        $collector->flush();
+                        $this->app->make(ExecutionSourceTracker::class)->reset();
+                    } catch (Throwable) {
+                        // Octane isolation must not break the worker.
+                    }
+                });
+            }
+        } catch (Throwable) {
+            // Registering outgoing capture must not break the host app.
         }
     }
 
