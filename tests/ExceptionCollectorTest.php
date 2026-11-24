@@ -4,12 +4,17 @@ declare(strict_types=1);
 
 namespace Watch\Laravel\Tests;
 
+use Illuminate\Console\Events\CommandFinished;
+use Illuminate\Contracts\Queue\Job;
 use Illuminate\Foundation\Auth\User;
 use Illuminate\Foundation\Exceptions\Handler;
 use Illuminate\Http\Response;
 use Illuminate\Queue\Events\JobFailed;
+use Illuminate\Queue\Events\JobProcessed;
 use Illuminate\Support\Facades\DB;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Symfony\Component\Console\Input\ArrayInput;
+use Symfony\Component\Console\Output\NullOutput;
 use Watch\Laravel\Capture\ExceptionCollector;
 use Watch\Laravel\Capture\UserSnapshot;
 use Watch\Laravel\Context\RequestContext;
@@ -357,6 +362,20 @@ final class ExceptionCollectorTest extends TestCase
         $this->assertSame(500, $this->transport->ofType('request')[0]['status']);
     }
 
+    public function test_transport_failure_leaves_the_throwable_eligible_for_a_later_report(): void
+    {
+        $collector = $this->app->make(ExceptionCollector::class);
+        $exception = new \RuntimeException('transport unavailable');
+        $this->app->instance(Transport::class, new ThrowingTransport());
+        $collector->record($exception, false);
+
+        $this->app->instance(Transport::class, $this->transport);
+        report($exception);
+        $collector->flush();
+
+        $this->assertSame(['transport unavailable'], array_column($this->transport->ofType('exception'), 'message'));
+    }
+
     public function test_missing_config_defaults_to_enabled_and_only_a_bool_false_disables_it(): void
     {
         $watch = config('watch');
@@ -482,7 +501,27 @@ final class ExceptionCollectorTest extends TestCase
         $this->assertStringNotContainsString('cli-secret', json_encode($event, JSON_THROW_ON_ERROR));
     }
 
-    public function test_failed_job_reopens_as_unhandled_without_a_request_id(): void
+    public function test_worker_report_after_job_failed_stays_out_of_later_flushes(): void
+    {
+        $context = $this->app->make(RequestContext::class);
+        $this->assertFalse($context->isActive());
+        $exception = new \RuntimeException('failed job');
+        event(new JobFailed('sync', $this->createStub(Job::class), $exception));
+
+        $events = $this->transport->ofType('exception');
+        $this->assertCount(1, $events);
+        $this->assertFalse($events[0]['handled']);
+        $this->assertNull($events[0]['request_id']);
+
+        report($exception);
+        $this->assertSame(0, $context->bufferedExceptionCount());
+        event(new JobProcessed('sync', $this->createStub(Job::class)));
+        event(new CommandFinished('queue:work', new ArrayInput([]), new NullOutput(), 0));
+        $this->app->terminate();
+        $this->assertSame($events, $this->transport->ofType('exception'));
+    }
+
+    public function test_reports_before_and_after_job_failed_emit_one_unhandled_exception(): void
     {
         $this->assertFalse($this->app->make(RequestContext::class)->isActive());
         $exception = new \RuntimeException('token=job-secret');
@@ -497,6 +536,28 @@ final class ExceptionCollectorTest extends TestCase
         $this->assertNull($events[0]['request_id']);
         $this->assertSame('token=[redacted]', $events[0]['message']);
         $this->assertStringNotContainsString('job-secret', json_encode($events[0], JSON_THROW_ON_ERROR));
+
+        report($exception);
+        event(new JobProcessed('sync', $this->createStub(Job::class)));
+        $this->assertSame($events, $this->transport->ofType('exception'));
+    }
+
+    public function test_emitted_throwable_is_collectible_and_a_new_instance_with_the_same_message_is_sent(): void
+    {
+        $collector = $this->app->make(ExceptionCollector::class);
+        $exception = new \RuntimeException('same message');
+        $reference = \WeakReference::create($exception);
+        $collector->record($exception, true);
+        $collector->flush((new Response())->withException($exception));
+        $this->assertCount(1, $this->transport->ofType('exception'));
+
+        unset($exception);
+        $this->assertNull($reference->get());
+        $collector->record(new \RuntimeException('same message'), false);
+
+        $events = $this->transport->ofType('exception');
+        $this->assertSame(['same message', 'same message'], array_column($events, 'message'));
+        $this->assertSame([true, false], array_column($events, 'handled'));
     }
 
     public function test_sampled_out_requests_still_emit_exceptions(): void

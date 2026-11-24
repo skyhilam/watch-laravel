@@ -38,6 +38,9 @@ final class ExceptionCollector
     /** @var WeakMap<object, true> */
     private WeakMap $attached;
 
+    /** @var WeakMap<Throwable, true> */
+    private WeakMap $emitted;
+
     private bool $busy = false;
 
     /**
@@ -52,6 +55,7 @@ final class ExceptionCollector
         private readonly RequestEnvelopeFactory $envelopes,
     ) {
         $this->attached = new WeakMap();
+        $this->emitted = new WeakMap();
     }
 
     public function enabled(): bool
@@ -129,6 +133,10 @@ final class ExceptionCollector
                 return;
             }
 
+            if (isset($this->emitted[$throwable])) {
+                return;
+            }
+
             $context = $this->context();
             $context->rememberException($throwable, $handled !== false, $this->now());
             if ($context->isActive() || $handled === null) {
@@ -159,13 +167,18 @@ final class ExceptionCollector
             $this->noteResponse($response, $context);
             $pending = $context->pullExceptions();
             $events = [];
+            $throwables = [];
             foreach ($pending as $item) {
                 $event = $this->eventFor($item, $context);
                 if ($event !== null) {
                     $events[] = $event;
+                    $throwables[] = $item['throwable'];
                 }
             }
             $this->send($events);
+            foreach ($throwables as $throwable) {
+                $this->emitted[$throwable] = true;
+            }
         } catch (Throwable) {
             try {
                 $this->recorder->add(Reason::TRANSPORT_ERROR);
@@ -181,6 +194,10 @@ final class ExceptionCollector
     {
         $exception = $this->responseException($response);
         if (! $exception instanceof Throwable) {
+            return;
+        }
+
+        if (isset($this->emitted[$exception])) {
             return;
         }
 
@@ -508,15 +525,7 @@ final class ExceptionCollector
             return;
         }
 
-        try {
-            $this->container->make(Transport::class)->send($events);
-        } catch (Throwable) {
-            try {
-                $this->recorder->add(Reason::TRANSPORT_ERROR);
-            } catch (Throwable) {
-                // fail-open
-            }
-        }
+        $this->container->make(Transport::class)->send($events);
     }
 
     private function now(): string
