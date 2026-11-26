@@ -714,6 +714,18 @@ class WatchServiceProvider extends ServiceProvider
                     return \Watch\Laravel\WatchServiceProvider::respondToE2eSlowQueryFixture();
                 })->middleware('web')->name('watch.e2e.slow-query');
             }
+
+            if (! $router->has('watch.e2e.queries')) {
+                $router->get('/watch-e2e-queries', static function () {
+                    return \Watch\Laravel\WatchServiceProvider::respondToE2eQueriesFixture(false);
+                })->middleware('web')->name('watch.e2e.queries');
+            }
+
+            if (! $router->has('watch.e2e.queries-overflow')) {
+                $router->get('/watch-e2e-queries-overflow', static function () {
+                    return \Watch\Laravel\WatchServiceProvider::respondToE2eQueriesFixture(true);
+                })->middleware('web')->name('watch.e2e.queries-overflow');
+            }
         });
     }
 
@@ -790,6 +802,36 @@ class WatchServiceProvider extends ServiceProvider
         }
 
         return watch_e2e_run_slow_query();
+    }
+
+    /**
+     * E2E only. GET /watch-e2e-queries runs a list query, six queries with one
+     * fingerprint and one literal query. GET /watch-e2e-queries-overflow runs
+     * more queries than the per-request cap. The statements are
+     * workbench/WatchE2eQueries.php, so the captured call site is that file and
+     * not this provider. A missing workbench file is a 500 with a fixed marker.
+     *
+     * @return \Illuminate\Http\Response|\Symfony\Component\HttpFoundation\Response
+     */
+    public static function respondToE2eQueriesFixture(bool $overflow)
+    {
+        $marker = $overflow ? 'watch-e2e-queries-overflow-error' : 'watch-e2e-queries-error';
+        if (! class_exists(\Watch\Laravel\Workbench\WatchE2eQueries::class, false)) {
+            $path = dirname(__DIR__).'/workbench/WatchE2eQueries.php';
+            if (! is_file($path)) {
+                return response($marker, 500);
+            }
+
+            require_once $path;
+        }
+
+        if (! class_exists(\Watch\Laravel\Workbench\WatchE2eQueries::class, false)) {
+            return response($marker, 500);
+        }
+
+        return $overflow
+            ? \Watch\Laravel\Workbench\WatchE2eQueries::respondOverflow()
+            : \Watch\Laravel\Workbench\WatchE2eQueries::respond();
     }
 
     private static function e2eEnv(string $key): string

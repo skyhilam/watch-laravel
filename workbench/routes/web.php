@@ -158,4 +158,23 @@ if (! $router->has('watch.e2e.slow-query')) {
     })->name('watch.e2e.slow-query');
 }
 
+/*
+ * SQL timeline for scripts/e2e.sh. WatchE2eQueries runs one list query, six
+ * queries with one fingerprint (N+1) and one literal query, or 210 queries to
+ * pass the per-request cap. The statements live in workbench/WatchE2eQueries.php
+ * so the captured call site is that file. Skip each name the Testbench 6
+ * fallback or WatchServiceProvider already registered.
+ */
+require_once dirname(__DIR__).'/WatchE2eQueries.php';
+if (! $router->has('watch.e2e.queries')) {
+    Route::get('/watch-e2e-queries', function () {
+        return \Watch\Laravel\Workbench\WatchE2eQueries::respond();
+    })->name('watch.e2e.queries');
+}
+if (! $router->has('watch.e2e.queries-overflow')) {
+    Route::get('/watch-e2e-queries-overflow', function () {
+        return \Watch\Laravel\Workbench\WatchE2eQueries::respondOverflow();
+    })->name('watch.e2e.queries-overflow');
+}
+
 require __DIR__.'/request-detail.php';

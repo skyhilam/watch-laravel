@@ -109,6 +109,7 @@ WATCH_CAPTURE_QUERY=true
 - `WATCH_TOKEN` 格式錯：略過個 token，app 照常起。每個 process 只記一次 warning，warning 唔包含 token 或 key。
 - 連唔到 agent 或者寫入超時：事件改寫入本機 spool，之後由 agent 補送。測試環境預設唔寫 spool，見「Spool 位置同 git」。
 - Spool 滿、寫唔到、或者過期：事件會 drop，並按原因計數報上 central。唔會靜默當成已錄。
+- SQL 收集（`DB::listen`）或階段量度拋例外：吞掉，最壞係少咗 `query` event 或 `phases`。
 - 以上任何情況，業務 HTTP response 都唔會變，亦唔會因為套件而出 5xx。
 
 `sample_rate` 預設 `1.0`，意思係「意圖全量」，唔係「保證全量」。
@@ -137,6 +138,30 @@ card_number    cvv
 - Query string 唔會寫入 path。`Referer`、`Origin`、`Location` 呢類 URL header 會去走 query、fragment 同 userinfo。
 - 日誌嘅 context 會先遮罩。
 - `watch.redact` 只可以加 key。刪走預設 key 唔會令佢失效。
+
+## SQL 時間線同階段
+
+預設開啟。每個 HTTP request 入面嘅 SQL 以獨立 `query` event 送去 central，用嚟喺 request 詳情砌 waterfall 同偵測 N+1；request event 另帶 `phases`（bootstrap、middleware、controller、render、sending、terminating）。**唔收 bindings**，只收正規化 SQL（literal 換成 `?`，經遮罩）、指紋、耗時、connection 同第一個非 vendor 呼叫位置。
+
+```php
+// config/watch.php
+'collectors' => [
+    'query' => [
+        'enabled' => env('WATCH_QUERIES_ENABLED', true), // false 就完全唔收、唔送 query event
+        'max_per_request' => env('WATCH_QUERIES_MAX_PER_REQUEST', 200), // 超出按指紋彙總
+        'max_sql_bytes' => 4096,
+    ],
+],
+```
+
+- 舊版已發佈 config 冇 `collectors.query` 唔使重新發佈，逐項用預設。
+- 超出 `max_per_request` 嘅 query 按指紋彙總，並送 `completeness` `reason=query_buffer_overflow`。**要先升級 central**，舊 central 會將含呢個 reason 嘅整批回 `400`。
+- 每條 query 計入 agent 同 central 嘅 ingest 配額，流量大要留意。
+- 非 Octane 時 `duration_ms` 由 `LARAVEL_START` 起計，包括 bootstrap。升級後同一條 route 嘅 `duration_ms` 偏高，會影響 central 嘅 p95 同門檻。
+- Fail-open：`DB::listen` 回調、正規化、階段量度出錯都會吞掉，唔影響 response。
+- 效能影響**未實測**。
+
+詳情見 [docs/package.md](../../docs/package.md)。
 
 ## Agent
 
