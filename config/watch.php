@@ -158,6 +158,15 @@ return [
             'max_per_request' => 50, // 每次執行最多幾條外呼。0 或非正整數回退 50，唔係無限。
             'max_path_bytes' => 2048, // 遮罩後 path（含 query）bytes。唔會切斷成半個 UTF-8。0 回退 2048。
         ],
+        // 每個 HTTP request 嘅 SQL 時間線（waterfall、N+1 偵測）。
+        // 唔收 bindings：只收正規化之後（literal 換成 ?）嘅 SQL、指紋、耗時同呼叫位置。
+        // 每條 query 係一件獨立 event，會扣 agent 同中央嘅 ingest 配額，所以流量大要留意。
+        // 可以用 WATCH_QUERIES_ENABLED=false 完全關閉，關閉後唔會送任何 query event。
+        'query' => [
+            'enabled' => env('WATCH_QUERIES_ENABLED', true), // 設 false（或 env 'false'／'0'）先停；其他型別當未設定，維持開啟。
+            'max_per_request' => env('WATCH_QUERIES_MAX_PER_REQUEST', 200), // 每次 request 逐條收嘅上限。超出按指紋彙總，0 或非正整數回退 200（唔係無限）。
+            'max_sql_bytes' => 4096, // 正規化同遮罩之後嘅 SQL bytes，截斷唔會切斷成半個 UTF-8。0 回退 4096。
+        ],
     ],
 
     /*

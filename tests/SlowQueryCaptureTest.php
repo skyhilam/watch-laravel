@@ -322,8 +322,10 @@ final class SlowQueryCaptureTest extends TestCase
         $this->assertCount(2, $slow);
         $this->assertStringContainsString('overflow_1', $slow[0]['normalized_sql']);
         $this->assertStringContainsString('overflow_2', $slow[1]['normalized_sql']);
-        $this->assertStringNotContainsString('overflow_fast', json_encode($transport->events(), JSON_THROW_ON_ERROR));
-        $this->assertStringNotContainsString('overflow_3', json_encode($transport->events(), JSON_THROW_ON_ERROR));
+        // The query timeline (type=query) keeps every statement; only slow_query is thresholded.
+        $slowJson = json_encode($slow, JSON_THROW_ON_ERROR);
+        $this->assertStringNotContainsString('overflow_fast', $slowJson);
+        $this->assertStringNotContainsString('overflow_3', $slowJson);
 
         $request = $transport->ofType('request')[0];
         foreach ($slow as $event) {
@@ -625,6 +627,7 @@ final class SlowQueryCaptureTest extends TestCase
             \Watch\Laravel\Queue\JobCapturer::class,
             JobContext::class,
             SlowQueryListener::class,
+            \Watch\Laravel\Database\QueryCollector::class,
         ], OctaneListener::WARM);
 
         $events = $this->app->make(Dispatcher::class);
@@ -678,6 +681,7 @@ final class SlowQueryCaptureTest extends TestCase
             'scheduled_task',
             'schedule_registry',
             'slow_query',
+            'query',
         ], $types);
 
         $dir = sys_get_temp_dir().'/watch-slow-query-'.bin2hex(random_bytes(4));

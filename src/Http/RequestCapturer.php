@@ -18,12 +18,14 @@ use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Context\RequestContext;
 use Watch\Laravel\Context\Traceparent;
 use Watch\Laravel\Contracts\Transport;
+use Watch\Laravel\Database\QuerySettings;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
 use Watch\Laravel\Outgoing\OutgoingRequestCollector;
 use Watch\Laravel\Query\SlowQueryListener;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
 use Watch\Laravel\Support\Uuid7;
+use Watch\Laravel\Timing\PhaseRecorder;
 
 final class RequestCapturer
 {
@@ -42,8 +44,12 @@ final class RequestCapturer
         return $this->truthy(config('watch.enabled'), true);
     }
 
-    public function begin(Request $request): void
+    /**
+     * $enteredNs is the hrtime at the entry of CaptureRequest::handle.
+     */
+    public function begin(Request $request, ?int $enteredNs = null): void
     {
+        $enteredNs ??= hrtime(true);
         try {
             $this->exceptions->forgetResponseNote();
             $this->exceptions->attachFromContainer();
@@ -72,6 +78,12 @@ final class RequestCapturer
             $logLimit,
         );
         try {
+            // Moves the start to the process start or to $enteredNs.
+            $this->container->make(PhaseRecorder::class)->begin($this->context(), $enteredNs);
+        } catch (Throwable) {
+            // The request keeps the start taken above; phases that need the missing marks are left out.
+        }
+        try {
             $this->context()->setSlowQueryLimit($this->slowQueryLimit());
         } catch (Throwable) {
             // A missing limit falls back to the context default.
@@ -83,9 +95,14 @@ final class RequestCapturer
         }
     }
 
-    public function finish(Request $request, Response $response): void
+    /**
+     * $finishedNs is the hrtime at the entry of CaptureRequest::terminate:
+     * duration_ms stops there, before the capture work below.
+     */
+    public function finish(Request $request, Response $response, ?int $finishedNs = null): void
     {
         $context = $this->context();
+        $context->stopClock($finishedNs);
         if (! $context->isActive()) {
             try {
                 $this->exceptions->flush($response);
@@ -124,6 +141,7 @@ final class RequestCapturer
     {
         if ($context->requestId() === null) {
             $this->discardSlowQueries($context);
+            $this->discardQueries($context);
 
             return;
         }
@@ -131,6 +149,7 @@ final class RequestCapturer
         if (! $context->isSampled()) {
             // Sampled-out requests stay honest: no slow queries and no overflow.
             $this->discardSlowQueries($context);
+            $this->discardQueries($context);
             $this->recorder->add(Reason::SAMPLED_OUT);
             $this->send([
                 $this->envelopes->completeness(
@@ -162,6 +181,10 @@ final class RequestCapturer
             $details['payload'],
             $details
         );
+        $phases = $this->phases($context);
+        if ($phases !== []) {
+            $event['phases'] = $phases;
+        }
         // Query is an object in protocol v1, including the captured empty map.
         if (isset($event['query']) && is_array($event['query'])) {
             $event['query'] = (object) $event['query'];
@@ -193,6 +216,97 @@ final class RequestCapturer
         $events = $this->appendSlowQueries($context, $events);
 
         $this->send($events);
+        $this->sendQueries($context, $container);
+    }
+
+    /**
+     * Fail-open: any failure only leaves `phases` out of the request event.
+     *
+     * @return list<array{name: string, offset_ms: float, duration_ms: float}>
+     */
+    private function phases(RequestContext $context): array
+    {
+        try {
+            $phases = $this->container->make(PhaseRecorder::class)->phases($context);
+
+            return is_array($phases) ? array_values($phases) : [];
+        } catch (Throwable) {
+            return [];
+        }
+    }
+
+    /**
+     * The query timeline is sent in its own batch after the request: a large
+     * timeline must not delay the request event, and a failure here leaves the
+     * request, logs and slow queries already handed to transport. The buffer is
+     * always pulled so a disabled collector cannot leak it into the next request.
+     * Each event goes through Limits::envelope; one over the envelope limit is
+     * dropped and counted as transport_error.
+     */
+    private function sendQueries(RequestContext $context, Container $container): void
+    {
+        try {
+            $batch = $context->pullQueries();
+            if (! $this->queriesEnabled($container)) {
+                return;
+            }
+
+            $limits = $container->make(Limits::class);
+            $events = [];
+            $folded = 0;
+            $rows = [];
+            foreach ($batch['queries'] as $row) {
+                $rows[] = $row;
+            }
+            foreach ($batch['aggregates'] as $row) {
+                $row['aggregated'] = true;
+                $rows[] = $row;
+                $folded += is_int($row['count'] ?? null) ? $row['count'] : 0;
+            }
+
+            foreach ($rows as $row) {
+                $event = $this->envelopes->query($context, $row);
+                $event = $event === [] ? [] : $limits->envelope($event);
+                if ($event === []) {
+                    $this->recorder->add(Reason::TRANSPORT_ERROR);
+
+                    continue;
+                }
+                $events[] = $event;
+            }
+
+            $overflow = max($batch['overflow'], $folded);
+            if ($overflow > 0) {
+                $this->recorder->add(Reason::QUERY_BUFFER_OVERFLOW, $overflow);
+                $events[] = $this->envelopes->completeness($context, Reason::QUERY_BUFFER_OVERFLOW, $overflow, true);
+            }
+
+            $this->send($events);
+        } catch (Throwable) {
+            try {
+                $this->recorder->add(Reason::TRANSPORT_ERROR);
+            } catch (Throwable) {
+                // Still fail-open when the recorder itself is unavailable.
+            }
+        }
+    }
+
+    private function queriesEnabled(Container $container): bool
+    {
+        try {
+            return $container->make(QuerySettings::class)->enabled();
+        } catch (Throwable) {
+            return false;
+        }
+    }
+
+    private function discardQueries(RequestContext $context): void
+    {
+        try {
+            $context->pullQueries();
+        } catch (Throwable) {
+            // Dropping a sampled-out buffer must not change the response.
+        }
     }
 
     /**

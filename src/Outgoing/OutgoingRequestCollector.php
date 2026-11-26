@@ -227,11 +227,12 @@ final class OutgoingRequestCollector
         }
 
         $timing = $this->pullTimer($request) ?? $this->transferTiming($response);
+        $offset = isset($timing['ns']) ? $this->offsetMs($timing['ns']) : null;
         $target = $this->urls->sanitize($this->url($request));
         $source = $this->sources->current();
         $context = $this->context();
         $context->setOutgoingLimit($this->settings->maxPerRequest());
-        $context->pushOutgoingRequest([
+        $entry = [
             'source_type' => $source['source_type'],
             'source_name' => $source['source_name'],
             'method' => $method,
@@ -241,7 +242,25 @@ final class OutgoingRequestCollector
             'duration_ms' => $timing['duration_ms'],
             'failure_reason' => $failure,
             'started_at' => $timing['at'],
-        ]);
+        ];
+        if ($offset !== null) {
+            $entry['offset_ms'] = $offset;
+        }
+
+        $context->pushOutgoingRequest($entry);
+    }
+
+    /**
+     * Offset of the call start from the request start. Only an active request
+     * has one, and a clock failure just leaves the field out.
+     */
+    private function offsetMs(int $startedNs): ?float
+    {
+        try {
+            return $this->context()->offsetMs($startedNs);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**
@@ -347,7 +366,7 @@ final class OutgoingRequestCollector
     }
 
     /**
-     * @return array{duration_ms: int, at: string}
+     * @return array{duration_ms: int, at: string, ns?: int}
      */
     private function transferTiming(?object $response): array
     {

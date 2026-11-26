@@ -20,9 +20,12 @@ final class CaptureRequest
 
     public function handle(Request $request, Closure $next): Response
     {
+        // The request start when the process start cannot be used.
+        $enteredNs = hrtime(true);
+
         try {
             if ($this->capturer->enabled()) {
-                $this->capturer->begin($request);
+                $this->capturer->begin($request, $enteredNs);
             }
         } catch (Throwable) {
             $this->recorder->add(Reason::TRANSPORT_ERROR);
@@ -33,9 +36,12 @@ final class CaptureRequest
 
     public function terminate(Request $request, Response $response): void
     {
+        // duration_ms and the terminating phase both end here.
+        $finishedNs = hrtime(true);
+
         try {
             if ($this->capturer->enabled()) {
-                $this->capturer->finish($request, $response);
+                $this->capturer->finish($request, $response, $finishedNs);
             }
         } catch (Throwable) {
             $this->recorder->add(Reason::TRANSPORT_ERROR);

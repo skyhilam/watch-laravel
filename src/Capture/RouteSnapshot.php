@@ -7,6 +7,7 @@ namespace Watch\Laravel\Capture;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
 use Throwable;
+use Watch\Laravel\Http\MarkControllerPhase;
 
 class RouteSnapshot
 {
@@ -24,7 +25,14 @@ class RouteSnapshot
                 $name = $route->getName();
                 $action = $route->getActionName();
                 $action = is_string($action) ? Limits::bytes($action, 512) : 'Closure';
-                foreach (array_slice($route->gatherMiddleware(), 0, 50) as $item) {
+                foreach ($route->gatherMiddleware() as $item) {
+                    if (is_string($item) && ltrim($item, '\\') === MarkControllerPhase::class) {
+                        // The package's own timing marker is not app middleware.
+                        continue;
+                    }
+                    if (count($middleware) >= 50) {
+                        break;
+                    }
                     $middleware[] = is_string($item) ? Limits::bytes($item, 255) : 'Closure';
                 }
             }

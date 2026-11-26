@@ -15,6 +15,11 @@ final class RequestContext
 
     public const DEFAULT_SLOW_QUERY_LIMIT = 50;
 
+    public const DEFAULT_QUERY_LIMIT = 200;
+
+    /** Distinct fingerprints kept once the per-request buffer is full. */
+    public const QUERY_AGGREGATE_LIMIT = 200;
+
     private bool $active = false;
 
     private bool $sampled = false;
@@ -30,6 +35,18 @@ final class RequestContext
     private int $startedNs = 0;
 
     private ?\DateTimeImmutable $startedAt = null;
+
+    /** hrtime at CaptureRequest::terminate. 0 while the request is still running. */
+    private int $finishedNs = 0;
+
+    /**
+     * Phase boundaries of this request, written by PhaseRecorder: boundary
+     * name => hrtime (or a small counter). reset() drops them so the next
+     * Octane request cannot inherit a mark.
+     *
+     * @var array<string, int>
+     */
+    private array $phaseMarks = [];
 
     /** @var list<array{level: string, message: string, context: array<mixed>, logged_at: string}> */
     private array $logs = [];
@@ -84,6 +101,26 @@ final class RequestContext
     private int $slowQueryOverflow = 0;
 
     /**
+     * Full query timeline for this HTTP request: the first queryLimit rows are
+     * kept one by one. Bindings are never part of an entry. reset() drops all
+     * of it so the next Octane request cannot inherit it.
+     *
+     * @var list<array<string, mixed>>
+     */
+    private array $queries = [];
+
+    /**
+     * Rows past the limit, folded per fingerprint.
+     *
+     * @var array<string, array<string, mixed>>
+     */
+    private array $queryAggregates = [];
+
+    private int $queryLimit = self::DEFAULT_QUERY_LIMIT;
+
+    private int $queryOverflow = 0;
+
+    /**
      * The context of the request being handled right now.
      *
      * Long-lived singletons (the log processor, the capturer) can be built by
@@ -116,6 +153,8 @@ final class RequestContext
         $this->sampleRate = 1.0;
         $this->startedNs = 0;
         $this->startedAt = null;
+        $this->finishedNs = 0;
+        $this->phaseMarks = [];
         $this->logs = [];
         $this->logOverflow = 0;
         $this->logLimit = 200;
@@ -132,6 +171,104 @@ final class RequestContext
         $this->slowQueryLimit = self::DEFAULT_SLOW_QUERY_LIMIT;
         $this->pulledSlowQueries = [];
         $this->pulledQueryIndex = 0;
+        $this->queries = [];
+        $this->queryAggregates = [];
+        $this->queryLimit = self::DEFAULT_QUERY_LIMIT;
+        $this->queryOverflow = 0;
+    }
+
+    public function setQueryLimit(int $limit): void
+    {
+        $this->queryLimit = max(0, $limit);
+    }
+
+    public function queryLimit(): int
+    {
+        return $this->queryLimit;
+    }
+
+    /**
+     * Whether the next query with this fingerprint needs its SQL and call site.
+     * A repeat of an already folded fingerprint only adds to its totals, so the
+     * collector can skip the redaction and the stack walk.
+     */
+    public function queryNeedsDetail(string $fingerprint): bool
+    {
+        if (count($this->queries) < $this->queryLimit) {
+            return true;
+        }
+
+        return ! isset($this->queryAggregates[$fingerprint])
+            && count($this->queryAggregates) < self::QUERY_AGGREGATE_LIMIT;
+    }
+
+    /**
+     * Keep the first queries up to the limit, then fold later ones by
+     * fingerprint {count, duration_ms, offset_ms of the first, sql, file, line}.
+     * queryOverflow counts every folded query, even when the aggregate table
+     * itself is full and the row is only counted.
+     *
+     * @param array<string, mixed> $entry fingerprint, duration_ms and offset_ms are required
+     */
+    public function pushQuery(array $entry): void
+    {
+        $fingerprint = $entry['fingerprint'] ?? null;
+        if (! is_string($fingerprint) || $fingerprint === '') {
+            return;
+        }
+
+        if (count($this->queries) < $this->queryLimit) {
+            $this->queries[] = $entry;
+
+            return;
+        }
+
+        $this->queryOverflow++;
+        $duration = is_int($entry['duration_ms'] ?? null) || is_float($entry['duration_ms'] ?? null)
+            ? (float) $entry['duration_ms']
+            : 0.0;
+
+        if (isset($this->queryAggregates[$fingerprint])) {
+            $this->queryAggregates[$fingerprint]['count']++;
+            $this->queryAggregates[$fingerprint]['duration_ms'] = round($this->queryAggregates[$fingerprint]['duration_ms'] + $duration, 3);
+
+            return;
+        }
+
+        if (count($this->queryAggregates) >= self::QUERY_AGGREGATE_LIMIT || ! isset($entry['sql'])) {
+            return;
+        }
+
+        $entry['count'] = 1;
+        $entry['duration_ms'] = round($duration, 3);
+        $this->queryAggregates[$fingerprint] = $entry;
+    }
+
+    public function bufferedQueryCount(): int
+    {
+        return count($this->queries);
+    }
+
+    public function queryOverflow(): int
+    {
+        return $this->queryOverflow;
+    }
+
+    /**
+     * @return array{queries: list<array<string, mixed>>, aggregates: list<array<string, mixed>>, overflow: int}
+     */
+    public function pullQueries(): array
+    {
+        $batch = [
+            'queries' => $this->queries,
+            'aggregates' => array_values($this->queryAggregates),
+            'overflow' => $this->queryOverflow,
+        ];
+        $this->queries = [];
+        $this->queryAggregates = [];
+        $this->queryOverflow = 0;
+
+        return $batch;
     }
 
     public function rememberException(\Throwable $throwable, bool $handled, string $occurredAt): void
@@ -401,9 +538,46 @@ final class RequestContext
         return $this->sampleRate;
     }
 
+    public function startedNs(): int
+    {
+        return $this->startedNs;
+    }
+
     public function startedAt(): ?\DateTimeImmutable
     {
         return $this->startedAt;
+    }
+
+    /**
+     * Move the request start, with its wall-clock time, to a measured point:
+     * the process start outside Octane, otherwise the capture middleware entry.
+     */
+    public function startFrom(int $startedNs, \DateTimeImmutable $startedAt): void
+    {
+        if (! $this->active || $startedNs <= 0) {
+            return;
+        }
+
+        $this->startedNs = $startedNs;
+        $this->startedAt = $startedAt;
+    }
+
+    /**
+     * Freeze duration_ms. The first call wins, so the request event and its
+     * phases are measured against the same end.
+     */
+    public function stopClock(?int $finishedNs = null): void
+    {
+        if (! $this->active || $this->finishedNs !== 0) {
+            return;
+        }
+
+        $this->finishedNs = $finishedNs !== null && $finishedNs > 0 ? $finishedNs : hrtime(true);
+    }
+
+    public function finishedNs(): int
+    {
+        return $this->finishedNs;
     }
 
     public function durationMs(): int
@@ -412,13 +586,68 @@ final class RequestContext
             return 0;
         }
 
-        $elapsed = (hrtime(true) - $this->startedNs) / 1_000_000;
+        $end = $this->finishedNs !== 0 ? $this->finishedNs : hrtime(true);
+        $elapsed = ($end - $this->startedNs) / 1_000_000;
 
         return max(0, (int) round($elapsed));
     }
 
     /**
-     * @param array{level: string, message: string, context: array<mixed>, logged_at: string} $entry
+     * Milliseconds (3 decimals) from the request start to a point in time, for
+     * the waterfall. $hrtimeNs defaults to now. Null while no request is
+     * active or the clock cannot be read. Never negative, and never past the
+     * frozen end once the request has finished, so an offset stays within
+     * duration_ms.
+     */
+    public function offsetMs(?int $hrtimeNs = null): ?float
+    {
+        if (! $this->active || $this->startedNs <= 0) {
+            return null;
+        }
+
+        $at = $hrtimeNs ?? hrtime(true);
+        if ($at <= 0) {
+            return null;
+        }
+
+        if ($this->finishedNs !== 0 && $at > $this->finishedNs) {
+            $at = $this->finishedNs;
+        }
+
+        return round(max(0, $at - $this->startedNs) / 1_000_000, 3);
+    }
+
+    public function markPhase(string $boundary, int $value): void
+    {
+        if (! $this->active) {
+            return;
+        }
+
+        $this->phaseMarks[$boundary] = $value;
+    }
+
+    public function phaseMark(string $boundary): ?int
+    {
+        return $this->phaseMarks[$boundary] ?? null;
+    }
+
+    public function forgetPhaseMarks(string ...$boundaries): void
+    {
+        foreach ($boundaries as $boundary) {
+            unset($this->phaseMarks[$boundary]);
+        }
+    }
+
+    /**
+     * @return array<string, int>
+     */
+    public function phaseMarks(): array
+    {
+        return $this->phaseMarks;
+    }
+
+    /**
+     * @param array{level: string, message: string, context: array<mixed>, logged_at: string, offset_ms?: float} $entry
      */
     public function pushLog(array $entry): void
     {
@@ -436,7 +665,7 @@ final class RequestContext
     }
 
     /**
-     * @return list<array{level: string, message: string, context: array<mixed>, logged_at: string}>
+     * @return list<array{level: string, message: string, context: array<mixed>, logged_at: string, offset_ms?: float}>
      */
     public function logs(): array
     {

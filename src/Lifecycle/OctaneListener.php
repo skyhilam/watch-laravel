@@ -11,6 +11,7 @@ use Throwable;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Context\RequestContext;
 use Watch\Laravel\Contracts\Transport;
+use Watch\Laravel\Database\QueryCollector;
 use Watch\Laravel\Envelope\RequestEnvelopeFactory;
 use Watch\Laravel\Http\RequestCapturer;
 use Watch\Laravel\Logging\RequestLogProcessor;
@@ -21,6 +22,7 @@ use Watch\Laravel\Queue\JobCapturer;
 use Watch\Laravel\Queue\JobContext;
 use Watch\Laravel\Redaction\Redactor;
 use Watch\Laravel\Sampling\Sampler;
+use Watch\Laravel\Timing\PhaseRecorder;
 
 /**
  * Octane keeps one worker alive across requests and serves each request from
@@ -57,6 +59,7 @@ final class OctaneListener
         JobCapturer::class,
         JobContext::class,
         SlowQueryListener::class,
+        QueryCollector::class,
     ];
 
     /**
@@ -91,7 +94,9 @@ final class OctaneListener
 
     /**
      * Reset the request context wherever this request could have reached it:
-     * the sandbox, the current container, and the worker's own app.
+     * the sandbox, the current container, and the worker's own app. The reset
+     * also drops the previous request's phase marks, and tells PhaseRecorder
+     * that this worker runs under Octane, so no request gets a bootstrap phase.
      */
     public static function reset(Container $app, mixed $event = null): void
     {
@@ -115,6 +120,17 @@ final class OctaneListener
                 }
             } catch (Throwable) {
                 // Resetting state must never break the worker.
+            }
+
+            try {
+                if ($container->bound(PhaseRecorder::class)) {
+                    $recorder = $container->make(PhaseRecorder::class);
+                    if ($recorder instanceof PhaseRecorder) {
+                        $recorder->seenOctane();
+                    }
+                }
+            } catch (Throwable) {
+                // Phase timing must never break the worker.
             }
 
             try {

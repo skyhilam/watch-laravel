@@ -17,6 +17,8 @@ use Watch\Laravel\Completeness\Reason;
 use Watch\Laravel\Completeness\Recorder;
 use Watch\Laravel\Console\AgentCommand;
 use Watch\Laravel\Console\InstallCommand;
+use Watch\Laravel\Database\QueryCollector;
+use Watch\Laravel\Database\QuerySettings;
 use Watch\Laravel\Context\RequestContext;
 use Watch\Laravel\Contracts\AgentSocket;
 use Watch\Laravel\Contracts\CentralClient;
@@ -54,6 +56,7 @@ use Watch\Laravel\Spool\FilesystemSpoolWriter;
 use Watch\Laravel\Spool\GitIgnore;
 use Watch\Laravel\Spool\SpoolWriter;
 use Watch\Laravel\Support\WatchToken;
+use Watch\Laravel\Timing\PhaseRecorder;
 use Watch\Laravel\Transport\AgentTransport;
 use Watch\Laravel\Transport\Endpoint;
 use Watch\Laravel\Transport\StreamSocketClient;
@@ -99,6 +102,9 @@ class WatchServiceProvider extends ServiceProvider
         $this->app->singleton(SqlNormalizer::class);
         $this->app->singleton(CallerResolver::class);
         $this->app->singleton(SlowQueryListener::class);
+        $this->app->singleton(QuerySettings::class);
+        $this->app->singleton(QueryCollector::class);
+        $this->app->singleton(PhaseRecorder::class);
         $this->app->singleton(RequestCapturer::class);
         $this->app->singleton(Runtime::class, static fn (): Runtime => new Runtime());
 
@@ -130,6 +136,8 @@ class WatchServiceProvider extends ServiceProvider
         $this->registerScheduleCollector();
         $this->registerLifecycle();
         $this->registerSlowQueryCollector();
+        $this->registerQueryCollector();
+        $this->registerPhaseTiming();
         $this->registerE2eFixtureRoute();
     }
 
@@ -538,6 +546,65 @@ class WatchServiceProvider extends ServiceProvider
             FlushListener::register($this->app, $events);
         } catch (Throwable) {
             // Lifecycle hooks are best effort and must not break the host app.
+        }
+    }
+
+    /**
+     * Phase boundaries of an HTTP request. Every event is listened to by its
+     * name, so a Laravel without the class (PreparingResponse before 10,
+     * Terminating before 11) never loads it and simply sends fewer phases.
+     * boot() runs while BootProviders is still bootstrapping, so the
+     * "bootstrapped" listener is in place before that event fires.
+     */
+    private function registerPhaseTiming(): void
+    {
+        try {
+            $events = $this->app->make(Dispatcher::class);
+
+            $events->listen(PhaseRecorder::BOOTSTRAPPED, function (): void {
+                try {
+                    $this->app->make(PhaseRecorder::class)->booted();
+                } catch (Throwable) {
+                    // Timing must not break the bootstrap.
+                }
+            });
+
+            $events->listen(PhaseRecorder::ROUTE_MATCHED, function ($event = null): void {
+                try {
+                    $this->app->make(PhaseRecorder::class)->attach(is_object($event) ? ($event->route ?? null) : null);
+                } catch (Throwable) {
+                    // The route runs without the controller marker.
+                }
+            });
+
+            foreach (PhaseRecorder::EVENTS as $name => $boundary) {
+                $events->listen($name, function () use ($boundary): void {
+                    try {
+                        $this->app->make(PhaseRecorder::class)->mark($boundary);
+                    } catch (Throwable) {
+                        // A missing boundary only drops its phase.
+                    }
+                });
+            }
+        } catch (Throwable) {
+            // Registering phase timing must not break the host app.
+        }
+    }
+
+    /**
+     * The per-request query timeline listens to the same QueryExecuted event
+     * by name. watch:agent does not subscribe, same as slow queries.
+     */
+    private function registerQueryCollector(): void
+    {
+        try {
+            if (FlushListener::suppressesSlowQueries()) {
+                return;
+            }
+
+            $this->app->make(QueryCollector::class)->listen($this->app->make(Dispatcher::class));
+        } catch (Throwable) {
+            // Registering query capture must not break the host app.
         }
     }
 

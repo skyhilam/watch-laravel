@@ -19,7 +19,7 @@ final class Reason
 
     /**
      * Reported as its own completeness event when the per-execution slow-query
-     * buffer is flushed. Not a transport drop, so it stays out of drops() and
+     * buffer, or the per-request query timeline buffer, is flushed. Not a transport drop, so it stays out of drops() and
      * is not counted twice. docs/protocol.md and central already accept it.
      */
     public const QUERY_BUFFER_OVERFLOW = 'query_buffer_overflow';

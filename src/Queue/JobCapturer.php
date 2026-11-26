@@ -138,6 +138,10 @@ final class JobCapturer
             );
             $watch = $clean;
             $watch['pushed_at_ms'] = $this->nowMs();
+            $offset = $this->dispatchOffsetMs();
+            if ($offset !== null) {
+                $watch['dispatch_offset_ms'] = $offset;
+            }
 
             return ['watch' => $watch];
         } catch (Throwable) {
@@ -226,6 +230,7 @@ final class JobCapturer
             'trace_id' => $clean['trace_id'],
             'traceparent' => $clean['traceparent'],
             'pushed_at_ms' => $this->pushedAtMs($watch['pushed_at_ms'] ?? null),
+            'dispatch_offset_ms' => $this->dispatchOffset($watch['dispatch_offset_ms'] ?? null),
             'started_at_ms' => $this->nowMs(),
             'started_ns' => hrtime(true),
             'started_at' => $this->stamp(),
@@ -441,6 +446,10 @@ final class JobCapturer
 
         if (is_string($frame['job_id'] ?? null)) {
             $event['job_id'] = $frame['job_id'];
+        }
+
+        if (is_float($frame['dispatch_offset_ms'] ?? null)) {
+            $event['dispatch_offset_ms'] = $frame['dispatch_offset_ms'];
         }
 
         if (is_string($frame['trace_id'] ?? null) && is_string($frame['traceparent'] ?? null)) {
@@ -776,13 +785,37 @@ final class JobCapturer
         }
 
         $watch = [];
-        foreach (['request_id', 'trace_id', 'traceparent', 'pushed_at_ms'] as $key) {
+        foreach (['request_id', 'trace_id', 'traceparent', 'pushed_at_ms', 'dispatch_offset_ms'] as $key) {
             if (array_key_exists($key, $decoded['watch'])) {
                 $watch[$key] = $decoded['watch'][$key];
             }
         }
 
         return $watch;
+    }
+
+    /**
+     * Offset of this dispatch from the start of the HTTP request that made it.
+     * Null outside a request, so a worker or console dispatch carries none.
+     */
+    private function dispatchOffsetMs(): ?float
+    {
+        try {
+            return RequestContext::current($this->container)->offsetMs();
+        } catch (Throwable) {
+            return null;
+        }
+    }
+
+    private function dispatchOffset(mixed $value): ?float
+    {
+        if (! is_int($value) && ! is_float($value)) {
+            return null;
+        }
+
+        $value = (float) $value;
+
+        return is_finite($value) && $value >= 0 ? $value : null;
     }
 
     private function pushedAtMs(mixed $value): ?int

@@ -58,6 +58,11 @@ final class RequestEnvelopeFactory
             'logged_at' => $entry['logged_at'],
         ];
 
+        $offset = $entry['offset_ms'] ?? null;
+        if ((is_int($offset) || is_float($offset)) && is_finite((float) $offset) && $offset >= 0) {
+            $event['offset_ms'] = (float) $offset;
+        }
+
         return $this->withTrace($event, $context);
     }
 
@@ -177,6 +182,88 @@ final class RequestEnvelopeFactory
         }
 
         return $this->withTrace($event, $context);
+    }
+
+    /**
+     * One `query` event of an HTTP request: a single statement, or a
+     * per-fingerprint aggregate (aggregated=true, count, total duration_ms).
+     * bindings and params are removed here so a caller cannot attach them.
+     * ingest_id comes from Uuid7 and started_at is the request start plus the
+     * offset, in UTC seconds. Returns [] when the row cannot be a valid event.
+     *
+     * @param array<string, mixed> $fields
+     * @return array<string, mixed>
+     */
+    public function query(RequestContext $context, array $fields): array
+    {
+        foreach (array_keys($fields) as $key) {
+            if (is_string($key) && in_array(str_replace('-', '_', strtolower($key)), ['bindings', 'binding', 'params', 'parameters'], true)) {
+                unset($fields[$key]);
+            }
+        }
+
+        $sql = $fields['sql'] ?? null;
+        $fingerprint = $fields['fingerprint'] ?? null;
+        $requestId = $context->requestId();
+        if (! is_string($sql) || $sql === '' || strpos($sql, "\0") !== false || preg_match('//u', $sql) !== 1) {
+            return [];
+        }
+        if (! is_string($fingerprint) || preg_match('/^[0-9a-f]{64}$/', $fingerprint) !== 1 || $requestId === null) {
+            return [];
+        }
+
+        $offset = $this->milliseconds($fields['offset_ms'] ?? null);
+        $duration = $this->milliseconds($fields['duration_ms'] ?? null);
+        if ($offset === null || $duration === null) {
+            return [];
+        }
+
+        $connection = is_string($fields['connection'] ?? null) ? preg_replace('/[^\x20-\x7e]/', '', $fields['connection']) : '';
+        $connection = substr((string) $connection, 0, 64);
+
+        $start = $context->startedAt() ?? new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $startedAt = $start->modify(sprintf('+%d microseconds', (int) round($offset * 1000)));
+
+        $event = [
+            'type' => 'query',
+            'ingest_id' => $this->ingestId(),
+            'request_id' => $requestId,
+            'offset_ms' => $offset,
+            'duration_ms' => $duration,
+            'connection' => $connection === '' ? 'unknown' : $connection,
+            'sql' => $sql,
+            'fingerprint' => $fingerprint,
+            'started_at' => $this->stamp($startedAt === false ? $start : $startedAt),
+        ];
+
+        $file = $fields['file'] ?? null;
+        if (is_string($file) && $file !== '' && strpos($file, "\0") === false && strlen($file) <= 1024 && preg_match('//u', $file) === 1) {
+            $event['file'] = $file;
+            $line = $fields['line'] ?? null;
+            if (is_int($line) && $line >= 0) {
+                $event['line'] = $line;
+            }
+        }
+
+        $count = $fields['count'] ?? null;
+        if (($fields['aggregated'] ?? false) === true && is_int($count) && $count >= 1) {
+            $event['aggregated'] = true;
+            $event['count'] = $count;
+        }
+
+        return $this->withTrace($event, $context);
+    }
+
+    private function milliseconds(mixed $value): int|float|null
+    {
+        if (is_int($value)) {
+            return $value >= 0 && $value <= 86400000 ? $value : null;
+        }
+        if (is_float($value) && is_finite($value) && $value >= 0 && $value <= 86400000) {
+            return round($value, 3);
+        }
+
+        return null;
     }
 
     /**

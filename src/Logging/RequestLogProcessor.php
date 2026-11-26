@@ -135,16 +135,34 @@ final class RequestLogProcessor
         );
         $redacted = isset($captured['value']) && is_array($captured['value']) ? $captured['value'] : [];
 
-        $request->pushLog([
+        $entry = [
             'level' => $levelName,
             'message' => Limits::message($message, 8192),
             'context' => $redacted,
             'logged_at' => \DateTimeImmutable::createFromInterface($datetime)
                 ->setTimezone(new \DateTimeZone('UTC'))
                 ->format('Y-m-d\TH:i:s\Z'),
-        ]);
+        ];
+        $offset = $this->offsetMs($request);
+        if ($offset !== null) {
+            $entry['offset_ms'] = $offset;
+        }
+
+        $request->pushLog($entry);
 
         return $extra;
+    }
+
+    /**
+     * Optional waterfall offset. A clock failure leaves the log without one.
+     */
+    private function offsetMs(RequestContext $request): ?float
+    {
+        try {
+            return $request->offsetMs();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function levelName(object $record): string
